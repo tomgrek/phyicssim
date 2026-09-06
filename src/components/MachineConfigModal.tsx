@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { AlertTriangle, Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { type MachineTarget } from '../store/useStore';
 import { FdmNotice } from './FdmNotice';
@@ -12,6 +12,9 @@ import { TeknoBoxPicker } from './TeknoBoxPicker';
 
 /** The three ways this app can reach a machine. */
 type MachineLinkKind = 'usb' | 'cloud';
+
+/** Shown once per browser before the first connect; never again after acknowledged. */
+const SAFETY_ACK_KEY = 'physbox.safetyAck';
 
 /**
  * The machine itself, in one place.
@@ -65,6 +68,20 @@ export const MachineConfigModal: React.FC<{
 
   useEffect(() => webSerialManager.addListener(setMachineState), []);
 
+  // Gate on the first real connect attempt only. The auto-resume effect below
+  // never reaches this — it only fires for a device already connected once
+  // before, which means the warning already ran.
+  const [showSafetyWarning, setShowSafetyWarning] = useState(false);
+  const pendingConnectRef = useRef<(() => void) | null>(null);
+  const requestConnect = (action: () => void) => {
+    if (localStorage.getItem(SAFETY_ACK_KEY)) {
+      action();
+      return;
+    }
+    pendingConnectRef.current = action;
+    setShowSafetyWarning(true);
+  };
+
   /*
    * Pick the machine back up when the app opens.
    *
@@ -93,6 +110,10 @@ export const MachineConfigModal: React.FC<{
       await webSerialManager.disconnect();
       return;
     }
+    requestConnect(() => void doConnect());
+  };
+
+  const doConnect = async () => {
     setConnecting(true);
     try {
       localStorage.setItem('physbox.machineLink', link);
@@ -237,7 +258,7 @@ export const MachineConfigModal: React.FC<{
                         // standing in front of it, being asked to press Connect
                         // is a step with nothing behind it.
                         localStorage.setItem('physbox.cloudDeviceId', deviceId);
-                        void webSerialManager.connect({ kind: 'cloud', deviceId });
+                        requestConnect(() => void webSerialManager.connect({ kind: 'cloud', deviceId }));
                       }}
                     />
                   </div>
@@ -328,6 +349,52 @@ export const MachineConfigModal: React.FC<{
           </button>
         </div>
       </div>
+
+      {showSafetyWarning && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-5 space-y-4">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-amber-500" />
+              <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100">
+                Before you connect a machine
+              </h3>
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              This connects to a real machine that moves and cuts under its own power. Keep clear of
+              moving parts, wear eye protection{machineTarget === 'laser' ? ' rated for the beam' : ''},
+              and never leave a running job unattended. Use your own judgment — you are responsible
+              for the machine&apos;s safe operation.
+            </p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+              Provided with no warranty and no liability for injury, loss, or damage of any kind. Full
+              terms: PhysBox Permissive Public License (PPPL-1.0) — see License &amp; Disclaimers in
+              this app&apos;s Reference Guide.
+            </p>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => {
+                  pendingConnectRef.current = null;
+                  setShowSafetyWarning(false);
+                }}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg cursor-pointer"
+              >
+                No Machine Control
+              </button>
+              <button
+                onClick={() => {
+                  localStorage.setItem(SAFETY_ACK_KEY, '1');
+                  setShowSafetyWarning(false);
+                  pendingConnectRef.current?.();
+                  pendingConnectRef.current = null;
+                }}
+                className="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold rounded-lg cursor-pointer"
+              >
+                Acknowledged
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
