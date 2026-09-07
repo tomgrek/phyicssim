@@ -3000,7 +3000,12 @@ function App() {
                 to +/-2m at 2048px it lands near 2mm per texel instead.
                 normalBias offsets the lookup along the surface normal, which is
                 what keeps a body resting flat on the ground from shadow-acneing
-                itself into stripes. */}
+                itself into stripes. 0.01 was tuned against that case — coarse,
+                low-poly primitives. A lathed mesh with 96-120 radial wedges
+                around a ~5cm cap works out to roughly 2-3mm of arc per wedge,
+                right at this map's own ~2mm/texel resolution, so the acne
+                shows up radiating with the wedges instead of as stripes. 0.03
+                clears that without visible peter-panning at bench scale. */}
             <directionalLight
               position={[1.5, 3, 1.5]}
               intensity={darkMode ? 1.4 : 1.2}
@@ -3012,7 +3017,7 @@ function App() {
               shadow-camera-bottom={-2}
               shadow-camera-near={0.1}
               shadow-camera-far={12}
-              shadow-normalBias={0.01}
+              shadow-normalBias={0.03}
             />
             <Grid 
               infiniteGrid 

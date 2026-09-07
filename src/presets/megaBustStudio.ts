@@ -1,78 +1,159 @@
 import type { SceneGraph } from '../types/scene';
 
-// Generate high-resolution procedural bust mesh
-function generateHighPolyBustMesh(slices = 100, stacks = 70): { vertices: number[]; faces: number[] } {
+/**
+ * Builds a closed, solid lathe: an outer wall at radiusAt(z, theta), an inner
+ * wall at a fraction of that radius (thicknessRatio), and an annulus at each
+ * end connecting outer rim to inner rim. Two earlier approaches both turned
+ * out wrong for a
+ * bust-shaped profile with a genuine concavity (the neck):
+ *
+ * - A single open-ended wall (no caps at all) lets you see straight through
+ *   the opening into the inside of the far wall — which is what first read
+ *   as "translucent".
+ * - Capping each end with a fan to a single center point closes the opening,
+ *   but is still a zero-thickness shell: from an angle that grazes past the
+ *   neck's concavity, backface culling on the near wall can still open a
+ *   sightline through to empty space. The fan's ~100 thin triangles meeting
+ *   at one point are also a numerically delicate structure for shadow
+ *   mapping — self-shadow acne came out radiating with the wedges, which is
+ *   why it tracked the mesh's rotation relative to the fixed key light.
+ *
+ * A true thick shell removes both problems at once: there is always solid
+ * material behind the outer surface (no cavity to see into from any angle),
+ * and there's no single-point fan for the shadow map to alias against — the
+ * ends are quad strips, built the same reliable way as the side walls.
+ *
+ * Winding for each of outer wall / inner wall / bottom annulus / top annulus
+ * was checked numerically (outward-facing-normal test against the mesh
+ * centroid), not guessed: the inner wall's "away from material" direction is
+ * the opposite radial sense from the outer wall's, since they bound a thin
+ * gap rather than being a continuation of the same surface.
+ */
+function buildSolidLathe(
+  radiusAt: (z: number, theta: number) => number,
+  height: number,
+  slices: number,
+  stacks: number,
+  thicknessRatio: number
+): { vertices: number[]; faces: number[] } {
   const vertices: number[] = [];
   const faces: number[] = [];
+  const N = slices + 1;
 
-  for (let i = 0; i <= stacks; ++i) {
-    const v = i / stacks;
-    const z = v * 0.16; // 16 cm of height, laid along Y at the end of the loop
-
+  // A proportional thickness, not a fixed absolute offset: near the crown
+  // radiusAt already floors near-zero, and a fixed subtraction there just
+  // collides with that same floor from the inside — giving a zero-thickness,
+  // degenerate band of triangles right where the outer wall gets thinnest.
+  // Scaling by a fraction of the local radius instead keeps inner strictly
+  // less than outer everywhere the outer radius is positive, with no clamp
+  // needed.
+  const pushRing = (z: number, isInner: boolean) => {
     for (let j = 0; j <= slices; ++j) {
-      const u = j / slices;
-      const theta = u * Math.PI * 2;
-
-      let r = 0.02;
-
-      if (z < 0.02) {
-        // Pedestal base
-        r = 0.038 - 0.005 * (z / 0.02) + 0.003 * Math.cos(z * 400);
-      } else if (z < 0.06) {
-        // Shoulders & Chest
-        const st = (z - 0.02) / 0.04;
-        const w = 0.055 * (1 - st * 0.35);
-        const d = 0.028 * (1 - st * 0.3);
-        r = Math.sqrt(Math.pow(w * Math.sin(theta), 2) + Math.pow(d * Math.cos(theta), 2));
-      } else if (z < 0.09) {
-        // Neck
-        const nt = (z - 0.06) / 0.03;
-        r = 0.022 - 0.003 * Math.sin(nt * Math.PI);
-      } else if (z < 0.13) {
-        // Head & Facial features
-        const ht = (z - 0.09) / 0.04;
-        r = 0.028 + 0.006 * Math.sin(ht * Math.PI);
-        const front = Math.cos(theta);
-        const side = Math.sin(theta);
-        if (front > 0) {
-          // Nose & Chin
-          if (z >= 0.10 && z <= 0.12 && Math.abs(side) < 0.3) {
-            r += 0.012 * (1 - Math.abs(side) / 0.3) * Math.sin(((z - 0.10) / 0.02) * Math.PI);
-          }
-          if (z >= 0.092 && z <= 0.10) {
-            r += 0.008 * front * Math.sin(((z - 0.092) / 0.008) * Math.PI);
-          }
-        }
-      } else {
-        // Cranium dome & curls
-        const dt = (z - 0.13) / 0.03;
-        r = 0.03 * Math.sqrt(Math.max(0, 1 - dt * dt));
-        r += 0.0025 * Math.sin(theta * 12) * Math.cos(z * 80);
-      }
-
+      const theta = (j / slices) * Math.PI * 2;
+      const outerR = radiusAt(z, theta);
+      const r = isInner ? outerR * (1 - thicknessRatio) : outerR;
       const x = r * Math.cos(theta);
       const y = r * Math.sin(theta);
-
       // Geom vertices are stored Y-up (three.js); the MJCF builder maps
       // (x, y, z) -> (x, -z, y) for MuJoCo. So the lathe's height goes in Y,
-      // not Z, or the bust is compiled lying on its side. The remaining axis is
-      // negated rather than swapped so this stays a rotation about X: a bare
-      // swap flips the handedness and turns every face inside out.
+      // not Z, or the bust is compiled lying on its side. The remaining axis
+      // is negated rather than swapped so this stays a rotation about X: a
+      // bare swap flips the handedness and turns every face inside out.
       vertices.push(x, z, -y);
     }
-  }
+  };
 
+  const outerBase = 0;
+  for (let i = 0; i <= stacks; ++i) pushRing((i / stacks) * height, false);
+  const innerBase = vertices.length / 3;
+  for (let i = 0; i <= stacks; ++i) pushRing((i / stacks) * height, true);
+
+  // Outer wall.
   for (let i = 0; i < stacks; ++i) {
     for (let j = 0; j < slices; ++j) {
-      const first = i * (slices + 1) + j;
-      const second = first + slices + 1;
-
+      const first = outerBase + i * N + j;
+      const second = first + N;
       faces.push(first, second, first + 1);
       faces.push(second, second + 1, first + 1);
     }
   }
+  // Inner wall — reversed relative to the outer wall's index order.
+  for (let i = 0; i < stacks; ++i) {
+    for (let j = 0; j < slices; ++j) {
+      const first = innerBase + i * N + j;
+      const second = first + N;
+      faces.push(first, first + 1, second);
+      faces.push(second, first + 1, second + 1);
+    }
+  }
+  // Bottom annulus (z = 0 ring).
+  for (let j = 0; j < slices; ++j) {
+    const oa = outerBase + j, ob = outerBase + j + 1;
+    const ia = innerBase + j, ib = innerBase + j + 1;
+    faces.push(oa, ob, ia);
+    faces.push(ia, ob, ib);
+  }
+  // Top annulus (z = height ring).
+  const topOuter = outerBase + stacks * N;
+  const topInner = innerBase + stacks * N;
+  for (let j = 0; j < slices; ++j) {
+    const oa = topOuter + j, ob = topOuter + j + 1;
+    const ia = topInner + j, ib = topInner + j + 1;
+    faces.push(oa, ia, ob);
+    faces.push(ia, ib, ob);
+  }
 
   return { vertices, faces };
+}
+
+const BUST_WALL_THICKNESS_RATIO = 0.12;
+
+// Generate high-resolution procedural bust mesh
+function generateHighPolyBustMesh(slices = 100, stacks = 70): { vertices: number[]; faces: number[] } {
+  const radiusAt = (z: number, theta: number) => {
+    if (z < 0.02) {
+      // Pedestal base
+      return 0.038 - 0.005 * (z / 0.02) + 0.003 * Math.cos(z * 400);
+    }
+    if (z < 0.06) {
+      // Shoulders & Chest
+      const st = (z - 0.02) / 0.04;
+      const w = 0.055 * (1 - st * 0.35);
+      const d = 0.028 * (1 - st * 0.3);
+      return Math.sqrt(Math.pow(w * Math.sin(theta), 2) + Math.pow(d * Math.cos(theta), 2));
+    }
+    if (z < 0.09) {
+      // Neck
+      const nt = (z - 0.06) / 0.03;
+      return 0.022 - 0.003 * Math.sin(nt * Math.PI);
+    }
+    if (z < 0.13) {
+      // Head & Facial features
+      const ht = (z - 0.09) / 0.04;
+      let r = 0.028 + 0.006 * Math.sin(ht * Math.PI);
+      const front = Math.cos(theta);
+      const side = Math.sin(theta);
+      if (front > 0) {
+        // Nose & Chin
+        if (z >= 0.10 && z <= 0.12 && Math.abs(side) < 0.3) {
+          r += 0.012 * (1 - Math.abs(side) / 0.3) * Math.sin(((z - 0.10) / 0.02) * Math.PI);
+        }
+        if (z >= 0.092 && z <= 0.10) {
+          r += 0.008 * front * Math.sin(((z - 0.092) / 0.008) * Math.PI);
+        }
+      }
+      return r;
+    }
+    // Cranium dome & curls. Near the crown the dome term goes to 0 and the
+    // curl term can dip below it, flipping r negative — which wraps the
+    // point through the axis to the opposite side (x,y negate) instead of
+    // sitting at the pole, pinching the mesh into itself there.
+    const dt = (z - 0.13) / 0.03;
+    const dome = 0.03 * Math.sqrt(Math.max(0, 1 - dt * dt));
+    return Math.max(0.001, dome + 0.0025 * Math.sin(theta * 12) * Math.cos(z * 80));
+  };
+
+  return buildSolidLathe(radiusAt, 0.16, slices, stacks, BUST_WALL_THICKNESS_RATIO);
 }
 
 const bustMeshData = generateHighPolyBustMesh(120, 80);
