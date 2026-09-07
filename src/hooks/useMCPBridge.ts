@@ -1142,7 +1142,18 @@ export function useMCPBridge() {
            */
           const scene = (window as any)._physics_scene;
           const camera = (window as any)._physics_camera;
-          if (scene && camera) {
+          // The EffectComposer (ambient occlusion) owns the render loop once it's
+          // mounted, so a raw gl.render() below would draw a frame with no AO
+          // applied — the screenshot would silently disagree with what's on
+          // screen. Render through the composer when it's there.
+          const composer = (window as any)._physics_composer;
+          if (composer) {
+            try {
+              composer.render();
+            } catch {
+              // Fall through to the raw render below.
+            }
+          } else if (scene && camera) {
             try {
               gl.render(scene, camera);
             } catch {

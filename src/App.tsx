@@ -1,6 +1,7 @@
 
 import { Canvas, useThree } from '@react-three/fiber';
-import { Grid } from '@react-three/drei';
+import { Grid, Environment } from '@react-three/drei';
+import { EffectComposer, N8AO } from '@react-three/postprocessing';
 import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
 import { downloadMeshGeomStl } from './utils/meshStlExport';
 import SculptPanel from './components/SculptPanel';
@@ -435,7 +436,7 @@ const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
 
 
 
-const CAMERA_CONFIG = { position: [0.8, 0.6, 0.8] as [number, number, number], fov: 45 };
+const CAMERA_CONFIG = { position: [0.8, 0.6, 0.8] as [number, number, number], fov: 45, near: 0.01, far: 1000 };
 
 const getSyncedSceneGraph = (
   scene: SceneGraph,
@@ -1229,6 +1230,11 @@ function App() {
   }, [sceneGraph, model, data, mujoco, noteCards]);
 
   const threeSceneRef = useRef<THREE.Scene | null>(null);
+  // The EffectComposer instance, so a screenshot can render through the same
+  // post-processing pipeline the viewport uses (AO included) instead of a raw
+  // gl.render() that would silently skip every effect — see SCREENSHOT in
+  // useMCPBridge.
+  const composerRef = useRef<any>(null);
 
   /**
    * The scene, as meshes ready to be written to a file.
@@ -2948,7 +2954,7 @@ function App() {
             shadows="soft"
             onPointerMissed={handlePointerMissed}
             style={paintMode ? { cursor: 'crosshair' } : undefined}
-            gl={{ preserveDrawingBuffer: true }}
+            gl={{ preserveDrawingBuffer: true, logarithmicDepthBuffer: true }}
             onCreated={(state) => {
               (window as any)._physics_gl = state.gl;
               // The scene and camera as well as the renderer, so a screenshot
@@ -2974,7 +2980,17 @@ function App() {
             <SceneCapture sceneRef={threeSceneRef} />
             <DropHandler addComponent={addComponent} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} />
             <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
+            {/* background={false}: this only feeds reflections/specular highlights
+                on the PBR materials, it never replaces the flat <color> above.
+                Kept low so it reads as "materials aren't dead flat any more"
+                rather than "everything is suddenly glossy". */}
+            <Environment preset="apartment" background={false} environmentIntensity={0.35} />
             <ambientLight intensity={darkMode ? 0.35 : 0.6} />
+            {/* Fill light opposite the key light, well below its intensity — just
+                enough to lift the shadow side off pure black without flattening
+                the modeling the key light + AO are doing. */}
+            <directionalLight position={[-2, 1.2, -1.5]} intensity={darkMode ? 0.25 : 0.35} />
+            <hemisphereLight args={[darkMode ? '#334155' : '#e0f2fe', darkMode ? '#0b0f19' : '#94a3b8', 0.25]} />
             {/* The shadow camera is an orthographic box, and its default is +/-5m
                 with a 512px map. This scene lives at bench scale — the grid's
                 cells are 100mm and the camera sits 800mm out — so the default
@@ -3066,6 +3082,27 @@ function App() {
             <CameraController />
             <DragInteractionController />
             <PaintStrokeController />
+
+            {/* Subtle contact-shadow AO — reads as "more depth", not a style
+                change. The composer takes over the render loop from r3f, so a
+                screenshot has to render through it too (see composerRef,
+                _physics_composer, and SCREENSHOT in useMCPBridge) or it would
+                silently capture a frame with no AO applied. */}
+            <EffectComposer
+              ref={(instance) => {
+                composerRef.current = instance;
+                (window as any)._physics_composer = instance;
+              }}
+              multisampling={0}
+              enableNormalPass={false}
+            >
+              <N8AO
+                aoRadius={0.35}
+                intensity={1.2}
+                distanceFalloff={1}
+                color="black"
+              />
+            </EffectComposer>
           </Canvas>
 
           {/* Floating Viewport Camera Controls */}

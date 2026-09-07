@@ -123,7 +123,7 @@ export const CameraController = () => {
     if (controlsRef.current) registerLiveCamera(camera, controlsRef.current.target);
   }, [camera, controlsRef.current]);
 
-  return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} mouseButtons={{ LEFT: 99 as any, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
+  return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} minDistance={0.02} mouseButtons={{ LEFT: 99 as any, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
 };
 
 export const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: number; depth: number; height: number }) => {
@@ -273,6 +273,12 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       color: new THREE.Color(r, g, b),
       emissive: isSelected ? '#3b82f6' : '#000',
       emissiveIntensity: isSelected ? 0.2 : 0,
+      // Left at three.js's defaults (roughness 1, metalness 0) these bodies were
+      // fully matte and the new environment map had nothing to reflect. Matched
+      // to SculptSurface's own material so a sculpted part and a rigid body read
+      // the same under the same light.
+      roughness: 0.85,
+      metalness: 0.02,
       // Every geom in the scene funnels through this one memo, so the whole
       // viewport switches to wireframe from a single flag. Note this is the
       // material's own wireframe — every triangle of the tessellation, the
@@ -939,7 +945,7 @@ export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNode
       }}
     >
       <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial wireframe={wireframe} />
+      <meshStandardMaterial wireframe={wireframe} roughness={0.85} metalness={0.02} />
     </instancedMesh>
   );
 };
