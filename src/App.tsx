@@ -2984,13 +2984,14 @@ function App() {
                 on the PBR materials, it never replaces the flat <color> above.
                 Kept low so it reads as "materials aren't dead flat any more"
                 rather than "everything is suddenly glossy". */}
-            <Environment preset="apartment" background={false} environmentIntensity={0.35} />
+            <Environment preset="apartment" background={false} environmentIntensity={0.12} />
             <ambientLight intensity={darkMode ? 0.35 : 0.6} />
             {/* Fill light opposite the key light, well below its intensity — just
                 enough to lift the shadow side off pure black without flattening
-                the modeling the key light + AO are doing. */}
-            <directionalLight position={[-2, 1.2, -1.5]} intensity={darkMode ? 0.25 : 0.35} />
-            <hemisphereLight args={[darkMode ? '#334155' : '#e0f2fe', darkMode ? '#0b0f19' : '#94a3b8', 0.25]} />
+                the modeling the key light + AO are doing. Stacking this with a
+                hemisphere light on top of ambient + environment washed everything
+                toward white, so this is the only extra light left. */}
+            <directionalLight position={[-2, 1.2, -1.5]} intensity={darkMode ? 0.12 : 0.15} />
             {/* The shadow camera is an orthographic box, and its default is +/-5m
                 with a 512px map. This scene lives at bench scale — the grid's
                 cells are 100mm and the camera sits 800mm out — so the default
@@ -3094,11 +3095,15 @@ function App() {
                 (window as any)._physics_composer = instance;
               }}
               multisampling={0}
-              enableNormalPass={false}
+              enableNormalPass
             >
+              {/* enableNormalPass is required here: without it N8AO reconstructs
+                  normals from depth alone, which falls apart on curved/concave
+                  geometry (a sculpted bust, say) and shows up as a translucent
+                  halo instead of contact shadow. */}
               <N8AO
                 aoRadius={0.35}
-                intensity={1.2}
+                intensity={0.8}
                 distanceFalloff={1}
                 color="black"
               />
