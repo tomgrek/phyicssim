@@ -251,29 +251,56 @@ const stripMeshArrays = (node: any): any => {
 // `children` at all) crashed recompile with a bare "Cannot read properties
 // of undefined (reading 'forEach')" and no indication of which field or node
 // was at fault.
-const fillGeomDefaults = (g: any, bodyName: string, idx: number) => ({
-  name:    g.name    ?? `${bodyName}_geom_${idx}`,
-  type:    g.type    ?? 'box',
-  size:    g.size    ?? [0.25, 0.25, 0.25],
-  rgba:    g.rgba    ?? [0.6, 0.6, 0.9, 1],
-  ...(g.pos         !== undefined ? { pos: g.pos }         : {}),
-  ...(g.quat        !== undefined ? { quat: g.quat }       : {}),
-  ...(g.euler       !== undefined ? { euler: g.euler }     : {}),
-  ...(g.fromto      !== undefined ? { fromto: g.fromto }   : {}),
-  ...(g.mass        !== undefined ? { mass: g.mass }       : {}),
-  ...(g.friction    !== undefined ? { friction: g.friction }: {}),
-  ...(g.contype     !== undefined ? { contype: g.contype } : {}),
-  ...(g.conaffinity !== undefined ? { conaffinity: g.conaffinity } : {}),
-  ...(g.condim      !== undefined ? { condim: g.condim }   : {}),
-  ...(g.solref      !== undefined ? { solref: g.solref }   : {}),
-  ...(g.solimp      !== undefined ? { solimp: g.solimp }   : {}),
-  ...(g.vertices    !== undefined ? { vertices: g.vertices }: {}),
-  ...(g.faces       !== undefined ? { faces: g.faces }     : {}),
-  ...(g.dynamic     !== undefined ? { dynamic: g.dynamic } : {}),
-  ...(g.renderVertices !== undefined ? { renderVertices: g.renderVertices } : {}),
-  ...(g.csg         !== undefined ? { csg: g.csg }           : {}),
-  ...(g.role        !== undefined ? { role: g.role }         : {}),
-});
+// A mesh geom on a jointed body has to be dynamic:true or it renders from
+// vertices baked once into world space and never reads data.xpos/data.xmat
+// again — the body simulates and drags correctly, it just looks frozen in
+// place on screen. That is exactly the trap californiaRelief.ts and
+// megaBustStudio.ts fell into by hand-authoring mesh geoms without it, so an
+// agent supplying a mesh geom on a jointed body gets it defaulted here rather
+// than needing to know the field exists. renderVertices is auto-derived from
+// vertices (Y-up -> MuJoCo Z-up: (x,y,z)->(x,-z,y)) when the caller hasn't
+// supplied one, for the same reason: it's a pure function of vertices, not a
+// real second thing to author.
+const toRenderVertices = (vertices: number[]): number[] => {
+  const out = new Array(vertices.length);
+  for (let i = 0; i < vertices.length; i += 3) {
+    out[i] = vertices[i];
+    out[i + 1] = -vertices[i + 2];
+    out[i + 2] = vertices[i + 1];
+  }
+  return out;
+};
+
+const fillGeomDefaults = (g: any, bodyName: string, idx: number, bodyIsJointed: boolean) => {
+  const isMesh = (g.type ?? 'box') === 'mesh';
+  const dynamic = g.dynamic !== undefined ? g.dynamic : (isMesh && bodyIsJointed ? true : undefined);
+  const renderVertices = g.renderVertices !== undefined
+    ? g.renderVertices
+    : (dynamic && Array.isArray(g.vertices) ? toRenderVertices(g.vertices) : undefined);
+  return {
+    name:    g.name    ?? `${bodyName}_geom_${idx}`,
+    type:    g.type    ?? 'box',
+    size:    g.size    ?? [0.25, 0.25, 0.25],
+    rgba:    g.rgba    ?? [0.6, 0.6, 0.9, 1],
+    ...(g.pos         !== undefined ? { pos: g.pos }         : {}),
+    ...(g.quat        !== undefined ? { quat: g.quat }       : {}),
+    ...(g.euler       !== undefined ? { euler: g.euler }     : {}),
+    ...(g.fromto      !== undefined ? { fromto: g.fromto }   : {}),
+    ...(g.mass        !== undefined ? { mass: g.mass }       : {}),
+    ...(g.friction    !== undefined ? { friction: g.friction }: {}),
+    ...(g.contype     !== undefined ? { contype: g.contype } : {}),
+    ...(g.conaffinity !== undefined ? { conaffinity: g.conaffinity } : {}),
+    ...(g.condim      !== undefined ? { condim: g.condim }   : {}),
+    ...(g.solref      !== undefined ? { solref: g.solref }   : {}),
+    ...(g.solimp      !== undefined ? { solimp: g.solimp }   : {}),
+    ...(g.vertices    !== undefined ? { vertices: g.vertices }: {}),
+    ...(g.faces       !== undefined ? { faces: g.faces }     : {}),
+    ...(dynamic         !== undefined ? { dynamic } : {}),
+    ...(renderVertices  !== undefined ? { renderVertices } : {}),
+    ...(g.csg         !== undefined ? { csg: g.csg }           : {}),
+    ...(g.role        !== undefined ? { role: g.role }         : {}),
+  };
+};
 
 const fillJointDefaults = (j: any, bodyName: string, idx: number) => ({
   name:    j.name    ?? `${bodyName}_joint_${idx}`,
@@ -304,6 +331,8 @@ const fillBodyDefaults = (b: any): any => {
         b.curveBank ?? 0
       )
     : null;
+  const resolvedJoints = (b.joints ?? (b.isCurve === true ? [] : [{ type: 'free' }]))
+    .map((j: any, i: number) => fillJointDefaults(j, name, i));
   return {
     id,
     name,
@@ -312,9 +341,8 @@ const fillBodyDefaults = (b: any): any => {
     ...(b.quat  !== undefined ? { quat: b.quat }   : {}),
     ...(b.euler !== undefined ? { euler: b.euler } : {}),
     geoms:    (curveGeoms ?? b.geoms ?? (b.scad !== undefined ? [{ type: 'mesh', size: [1], dynamic: true }] : [{ type: 'box', size: [0.25, 0.25, 0.25] }]))
-                .map((g: any, i: number) => fillGeomDefaults(g, name, i)),
-    joints:   (b.joints  ?? (b.isCurve === true ? [] : [{ type: 'free' }]))
-                .map((j: any, i: number) => fillJointDefaults(j, name, i)),
+                .map((g: any, i: number) => fillGeomDefaults(g, name, i, resolvedJoints.length > 0)),
+    joints:   resolvedJoints,
     children: (b.children ?? []).map(fillBodyDefaults),
     ...(b.coupleTargetId  !== undefined ? { coupleTargetId: b.coupleTargetId }   : {}),
     ...(b.coupleRatio     !== undefined ? { coupleRatio: b.coupleRatio }         : {}),
@@ -1340,8 +1368,8 @@ export function useMCPBridge() {
               'Mesh vertical post example: vertices centred at (cx, halfHeight, cz) with hy=halfHeight (tall in Y)',
               'Mesh flat plank example: box(cx, 0.3, cz, halfSpan, 0.06, halfWidth) — small hy=thickness, large hx=span',
               'Mesh tetrahedron example: vertices=[0,0,0, 1,0,0, 0.5,1,0, 0.5,0.5,1], faces=[0,1,2, 0,1,3, 1,2,3, 0,2,3]',
-              'Static mesh (no dynamic field): visual-only. Vertices in Three.js Y-up world space. Never moves, never collides. Good for scenery and decorative structures.',
-              'Dynamic mesh (dynamic:true): full physics+collision. MuJoCo takes convex hull — concave shapes will not collide correctly. Requires renderVertices.',
+              'Static mesh (no dynamic field), on a body with no joint: never moves, but still collides normally (mesh collision doesn\'t depend on dynamic). Vertices in Three.js Y-up world space. Good for scenery and decorative structures.',
+              'Dynamic mesh (dynamic:true, or omitted — a jointed body\'s mesh geoms default to it now): renders synced to the body\'s live xpos/xmat every frame, which any body that actually moves needs. Collision always takes MuJoCo\'s convex hull of the vertices regardless of dynamic — concave shapes will not collide correctly either way. renderVertices is auto-derived from vertices if omitted.',
               'CRITICAL — hollow/concave containers (cups, boxes-with-open-tops, tubes): a single dynamic mesh geom can NEVER act as a real container, no matter how the vertices are shaped. MuJoCo collides dynamic meshes via their convex hull, and the hull of a hollow shape\'s vertices is just the solid outer envelope (it fills in the concave interior) — anything dropped on it lands on what is effectively a solid block. Build the hollow shape as a compound body instead: a floor + walls as separate primitive box/cylinder geoms on the same body (each primitive is individually convex, so together they form a real cavity). If you also want a nicer-looking CSG/OpenSCAD shell, add it as an EXTRA geom on the same body with contype:0 and conaffinity:0 (dynamic:true so it still tracks the body kinematically, but doesn\'t participate in collision) so the primitives handle physics while the mesh handles looks.',
               'GOTCHA — rgba alpha is NOT rendered as transparency in this app: the renderer\'s material always uses full opacity regardless of the 4th rgba value, so rgba:[r,g,b,0] does NOT make a geom invisible — it renders as solid opaque black (r=g=b=0), which commonly causes flickering/z-fighting where it overlaps another geom. To hide a primitive collision proxy, do NOT rely on alpha — either color it to match the geom it\'s layered under (e.g. same rgba as a decorative mesh sitting on top of it) or set contype:0/conaffinity:0 on whichever geom you don\'t want colliding and accept both are visible.',
               'Dynamic mesh renderVertices: just swap Y↔Z on each Y-up vertex: (x,y,z)→(x,-z,y). Do NOT subtract centroid. MuJoCo recenters internally.',

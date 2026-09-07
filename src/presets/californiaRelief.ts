@@ -255,11 +255,16 @@ export const californiaReliefPreset: SceneGraph = {
           vertices: caMesh.vertices,
           faces: caMesh.faces,
           rgba: [0.72, 0.66, 0.52, 1],
-          // Scenery, not a participant: this is a model to be carved, and a
-          // six-figure triangle mesh handed to the collider costs a great deal
-          // to convex-decompose for a body that never moves.
-          contype: 0,
-          conaffinity: 0,
+          // Loads with no joint (below) and stays contype/conaffinity default
+          // (normal collision) rather than 0/0: this used to disable collision
+          // outright on the reasoning that a body which never moves has no
+          // need for it, but contype:0/conaffinity:0 disables collision with
+          // EVERYTHING, including the ground — so a joint added later (to
+          // make it draggable) sends it falling straight through the floor
+          // with nothing to catch it. A six-figure triangle mesh does cost a
+          // real amount to convex-hull if it ever becomes a jointed,
+          // interactive body, but that's the deliberate tradeoff once that's
+          // wanted, not a mistake to optimize away by default.
         },
       ],
       joints: [],

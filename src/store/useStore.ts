@@ -134,6 +134,52 @@ const isAllMeshNode = (node: any) =>
 const isDynamicMesh = (g: any) => g.type === 'mesh' && g.dynamic && g.renderVertices;
 const isStaticMesh  = (g: any) => g.type === 'mesh' && !g.dynamic && g.vertices;
 
+// A mesh geom authored (by hand, by a preset file, or over MCP) without an
+// explicit dynamic:true sits in the static render path forever, even once a
+// joint makes the body actually move: static meshes render from vertices
+// baked once into world space and never re-read data.xpos/data.xmat, so the
+// body can drag and simulate correctly while looking frozen in place. Any
+// path that gives a node its first joint should flip its mesh geoms over to
+// the dynamic path here, deriving renderVertices from vertices (a plain
+// Y-up-to-MuJoCo-Z-up swap, (x,y,z)->(x,-z,y)) rather than requiring the
+// caller to have supplied it — see californiaRelief.ts / megaBustStudio.ts,
+// both of which hit exactly this before this function existed.
+const toRenderVertices = (vertices: number[]): number[] => {
+  const out = new Array(vertices.length);
+  for (let i = 0; i < vertices.length; i += 3) {
+    out[i] = vertices[i];
+    out[i + 1] = -vertices[i + 2];
+    out[i + 2] = vertices[i + 1];
+  }
+  return out;
+};
+
+const promoteMeshGeomsToDynamic = (node: any) => {
+  for (const g of node.geoms || []) {
+    if (g.type !== 'mesh' || g.dynamic) continue;
+    g.dynamic = true;
+    if (!g.renderVertices && Array.isArray(g.vertices)) {
+      g.renderVertices = toRenderVertices(g.vertices);
+    }
+  }
+};
+
+// The three call sites above (properties panel, MCP UPDATE_OBJECT, MCP
+// build/update-scene) all catch the trap at the moment a joint is *added* to
+// a node — but a hand-authored preset file can also just ship a body that is
+// ALREADY jointed with a mesh geom missing dynamic:true, with no "joint was
+// added" event for any of those to hook. Loading a scene graph sweeps for
+// that case once, up front, covering every entry point at once instead of
+// requiring yet another call site to remember this.
+const promoteJointedMeshGeomsDeep = (nodes: any[], ancestorJointed = false) => {
+  if (!nodes) return;
+  for (const node of nodes) {
+    const jointed = ancestorJointed || (node.joints && node.joints.length > 0);
+    if (jointed) promoteMeshGeomsToDynamic(node);
+    promoteJointedMeshGeomsDeep(node.children, jointed);
+  }
+};
+
 // Apply a function to flat vertex array in-place
 const mapVerts = (v: number[], fn: (x: number, y: number, z: number) => [number,number,number]) => {
   for (let i = 0; i < v.length; i += 3) {
@@ -872,6 +918,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         // A preset with no nodes is a corrupt or half-written entry rather than
         // an empty scene; recompiling it would throw inside the MJCF builder.
         if (savedScene && Array.isArray(savedScene.nodes)) {
+          promoteJointedMeshGeomsDeep(savedScene.nodes);
           get().recompile(savedScene as SceneGraph, null, true, true);
         }
       } catch (e) {
@@ -887,6 +934,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const scene: SceneGraph = name === 'empty'
       ? { nodes: [] }
       : cloneSceneGraph(preset.scene || get().sceneGraph);
+    promoteJointedMeshGeomsDeep(scene.nodes);
     set({
       isPlaying: false,
       selectedNodeId: null,
@@ -1690,7 +1738,17 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]): boolean => {
       for (const node of nodes) {
-        if (node.id === id) { Object.assign(node, updates); return true; }
+        if (node.id === id) {
+          Object.assign(node, updates);
+          // Same trap as updateNodeJointsList: an update that hands this node
+          // its first joint (e.g. an MCP physics_update_object call, not just
+          // the properties panel) needs its mesh geoms promoted too, or the
+          // body simulates and drags correctly while its render stays frozen.
+          if (updates.joints !== undefined && node.joints?.length > 0) {
+            promoteMeshGeomsToDynamic(node);
+          }
+          return true;
+        }
         if (traverse(node.children)) return true;
       }
       return false;
@@ -1710,6 +1768,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       for (const node of nodes) {
         if (node.id === id) {
           node.joints = joints;
+          if (joints.length > 0) promoteMeshGeomsToDynamic(node);
           return true;
         }
         if (traverse(node.children)) return true;
