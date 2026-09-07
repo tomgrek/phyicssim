@@ -102,9 +102,13 @@ describe('probeGrid against a live machine', () => {
     await webSerialManager.probeGrid(bounds, 3, 3);
 
     expect(fake.sent.filter(l => l.includes('G38.2'))).toHaveLength(9);
-    // Every probe is bracketed by a positioning move and a retract.
+    // Every probe is bracketed by a positioning move and a retract. The lift
+    // and the traverse are now two separate moves rather than one combined
+    // G0 X Y Z: starting below clearance height, a coordinated move cuts the
+    // corner and drags the tool diagonally across the work.
     const probeIdx = fake.sent.findIndex(l => l.includes('G38.2'));
-    expect(fake.sent[probeIdx - 1]).toMatch(/^G0 X0\.000 Y0\.000 Z5\.000/);
+    expect(fake.sent[probeIdx - 2]).toMatch(/^G0 Z5\.000/);
+    expect(fake.sent[probeIdx - 1]).toMatch(/^G0 X0\.000 Y0\.000 F3000/);
     // G90 restores absolute mode after the relative probe, then we retract.
     expect(fake.sent[probeIdx + 1]).toBe('G90');
     expect(fake.sent[probeIdx + 2]).toMatch(/^G0 Z5\.000/);

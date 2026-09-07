@@ -186,6 +186,16 @@ export interface ResumeOptions {
   spindleWarmupSeconds?: number;
   /** Extra height above the program's own retract to traverse at. */
   extraClearance?: number;
+  /**
+   * The tool's actual live work Z, if known. `state.safeZ` is the *program's*
+   * retract height, which is only clear of the job when the Z datum in force
+   * now is the one the program was cut against — against a stale or
+   * different one it can be below the tool already, and the retract this
+   * preamble opens with would turn into a plunge. Clamps the retract to
+   * never move down from here, the same rule every other retract in this
+   * app follows.
+   */
+  currentZ?: number;
 }
 
 /**
@@ -229,7 +239,8 @@ export function buildResumePreamble(
 
   if (!isLaser) {
     // Up and clear before anything moves sideways.
-    const clearZ = (state.safeZ ?? 5) + opt.extraClearance;
+    const wantedZ = (state.safeZ ?? 5) + opt.extraClearance;
+    const clearZ = options?.currentZ !== undefined ? Math.max(wantedZ, options.currentZ) : wantedZ;
     lines.push(`G0 Z${num(clearZ)} ; retract to the program's own clear height`);
 
     if (spindleLine) {

@@ -1241,7 +1241,7 @@ export function generateReliefCarveGcode(
   const exaggeration = Math.max(0.01, opts.verticalExaggeration);
   const zScale = proportional ? scaleFactor * exaggeration : carveDepth / modelH;
   const wantedDepth = modelH * zScale;
-  const reliefDepth = Math.min(carveDepth, wantedDepth);
+  let reliefDepth = Math.min(carveDepth, wantedDepth);
 
   if (proportional && wantedDepth > carveDepth + 1e-6) {
     warnings.push(
@@ -1252,10 +1252,22 @@ export function generateReliefCarveGcode(
     );
   }
 
-  if (reliefDepth > opts.stockThicknessMm - 1) {
+  // 'fill' targets carveDepthMm directly, unrelated to the X/Y fit-to-stock scale
+  // above, so a depth that no longer fits the stock is auto-reduced the same way
+  // the footprint is — the operator set a stock size, not a depth percentage.
+  // 'proportional' ties depth to plan scale and exaggeration instead; clamping it
+  // here would silently change that ratio, so it stays a warning to fix by hand.
+  const maxDepthForStock = Math.max(0.1, opts.stockThicknessMm - 1);
+  if (!proportional && reliefDepth > maxDepthForStock) {
+    warnings.push(
+      `Relief depth reduced to ${maxDepthForStock.toFixed(1)} mm to leave 1 mm under the ` +
+        `${opts.stockThicknessMm} mm stock (requested ${reliefDepth.toFixed(1)} mm).`
+    );
+    reliefDepth = maxDepthForStock;
+  } else if (proportional && reliefDepth > opts.stockThicknessMm - 1) {
     warnings.push(
       `A ${reliefDepth.toFixed(1)} mm relief in ${opts.stockThicknessMm} mm stock leaves under 1 mm ` +
-        `underneath. Cut the relief depth, or use thicker stock.`
+        `underneath. Cut the relief depth, lower the exaggeration, or use thicker stock.`
     );
   }
   reachWarn(

@@ -79,16 +79,25 @@ export interface MachineState {
   feedRate: number;
   spindleSpeed: number;
   /**
-   * Whether the work Z datum is known to be stale.
+   * Whether the work Z datum is unknown, stale, or otherwise not to be
+   * trusted for a Z move.
    *
-   * A tool change invalidates it: two bits are never the same length, so the Z
-   * zero that was touched off on the roughing mill is wrong by whatever the
-   * difference is the moment the finishing bit goes in — and it is wrong in the
-   * direction of driving the new tool into the work. Nothing on the machine
-   * knows this has happened, so the app has to remember it and say so, rather
-   * than letting Resume look like an ordinary button.
+   * True the moment a connection is opened: GRBL keeps G54's Z offset in
+   * EEPROM across sessions, tools and stock changes, so a datum that reads
+   * as perfectly valid may belong to a different setup entirely, and there is
+   * nothing in a status report that says whether *this* operator has zeroed
+   * *this* Z since. A tool change mid-job invalidates it the same way — two
+   * bits are never the same length, so the zero touched off on the roughing
+   * mill is wrong by whatever the difference is the moment the finishing bit
+   * goes in, and wrong in the direction of driving the new tool into the
+   * work. Nothing on the machine knows either has happened, so the app has to
+   * remember it and say so, rather than letting a Z move look like an
+   * ordinary one.
    *
-   * Set when a job pauses for a tool change, cleared by either zeroing route.
+   * Set on connect and when a job pauses for a tool change; cleared only by
+   * a zeroing route that actually writes a Z offset (`zeroZHere`, `zeroZ`,
+   * `zeroAllHere`) — never by starting a job, which is the moment it matters
+   * most and proves nothing about whether Z was re-touched off.
    */
   needsZZero: boolean;
   /**
@@ -433,7 +442,9 @@ class WebSerialManager {
     progressPercent: 0,
     feedRate: 0,
     spindleSpeed: 0,
-    needsZZero: false,
+    // Disconnected: there is no machine to have a stale datum, but nothing has
+    // been zeroed either, so a move guarded on this must still be blocked.
+    needsZZero: true,
     motion: DEFAULT_MOTION_PROFILE,
     grblSettings: {},
     overrides: { feed: 100, rapid: 100, spindle: 100 },
@@ -572,7 +583,10 @@ class WebSerialManager {
 
       this.transport = transport;
       this.startStatusPolling();
-      this.updateState({ status: 'IDLE', connected: true, portName: transport.label });
+      // A freshly opened port may report a Z work offset left over from a
+      // previous session, tool, or stock — GRBL has no way to say whether
+      // this operator has touched it off since, so it starts untrusted.
+      this.updateState({ status: 'IDLE', connected: true, portName: transport.label, needsZZero: true });
 
       // Ask what it is before anything else needs to know. Not awaited: the
       // connection is usable the moment it is open, and a controller that is
@@ -986,6 +1000,17 @@ class WebSerialManager {
       return null;
     }
 
+    // A laser job has no Z to plunge with, so an untouched Z datum cannot hurt
+    // it — everything else routes a spinning or moving tool toward a surface
+    // whose height this session has not actually confirmed.
+    if (this.state.needsZZero && !this.laserModeEnabled()) {
+      const message =
+        'Z zero has not been set this session. Set it in Machine Setup before running a job — ' +
+        'a Z move against an unconfirmed datum can drive the tool into the stock.';
+      this.updateState({ lastError: message });
+      return null;
+    }
+
     if (this.transport.runJob) {
       let result: { delivered: boolean; message: string };
       try {
@@ -1064,9 +1089,9 @@ class WebSerialManager {
       // something anyone can pick up.
       resume: null,
     park: null,
-      // Whatever was outstanding from a previous job's tool change, starting a
-      // new program is a fresh setup and the operator has just said so.
-      needsZZero: false,
+      // Left as-is deliberately: `runJob` has already refused to reach here
+      // while Z is untrusted, and clearing it just because a program started
+      // would be assuming the operator re-zeroed rather than checking.
     });
 
     this.advanceJobQueue();
@@ -1120,7 +1145,10 @@ class WebSerialManager {
       return { ok: false, message: 'There is no program to resume — nothing has been sent this session.' };
     }
 
-    const plan = planResume(this.program.map((l) => l.code), fromLine, options);
+    const plan = planResume(this.program.map((l) => l.code), fromLine, {
+      ...options,
+      currentZ: this.state.wpos.z,
+    });
     const preamble = prepareJobLines(plan.preamble.join('\n'));
     const tail = this.program.slice(plan.fromLine);
 
@@ -1394,7 +1422,8 @@ class WebSerialManager {
     // 4. Out of the cut. After a soft reset GRBL needs the modes restating
     //    before it will take a move.
     await this.sendLine('G21 G90');
-    await this.sendLine('G0 Z5');
+    const parkRetractZ = await this.clampedRetractZ(5);
+    await this.sendLine(`G0 Z${parkRetractZ.toFixed(3)}`);
     return true;
   }
 
@@ -1413,7 +1442,8 @@ class WebSerialManager {
     if (!park || this.state.status !== 'PAUSED_PARKED') return false;
 
     await this.sendLine('G21 G90');
-    await this.sendLine('G0 Z5');
+    const resumeRetractZ = await this.clampedRetractZ(5);
+    await this.sendLine(`G0 Z${resumeRetractZ.toFixed(3)}`);
     await this.sendLine(`G0 X${park.at.x.toFixed(3)} Y${park.at.y.toFixed(3)}`);
 
     this.updateState({ park: null, pauseMessage: undefined });
@@ -1952,10 +1982,23 @@ class WebSerialManager {
     }
   }
 
+  /**
+   * Reads back the live work Z and clamps a requested retract height to never
+   * sit below it — `safeZMm` is a work height, so against a work offset left
+   * over from a different stock or tool it can be below the tool already, and
+   * an unclamped move meant to retract becomes a plunge. May only move Z away
+   * from the stock, never toward it.
+   */
+  private async clampedRetractZ(safeZMm: number): Promise<number> {
+    await this.nextStatusReport();
+    return Math.max(safeZMm, this.state.wpos.z);
+  }
+
   /** Retracts and drives to the current work XY origin, to check where zero landed. */
   public async gotoWorkOrigin(safeZ = 5): Promise<void> {
     await this.sendLine('G21 G90');
-    await this.sendLine(`G0 Z${safeZ.toFixed(3)}`);
+    const retractZ = await this.clampedRetractZ(safeZ);
+    await this.sendLine(`G0 Z${retractZ.toFixed(3)}`);
     await this.sendLine('G0 X0.000 Y0.000 F3000');
   }
 
@@ -2060,9 +2103,18 @@ class WebSerialManager {
         let probedZ = 0;
 
         if (isLive) {
-          await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} Z5.000 F3000`);
+          // Not clamped like a retract: `probePoint` below travels a fixed
+          // 20 mm down from wherever this leaves the tool, and clamping this
+          // to "never below the tool's current position" can move it *up*
+          // instead whenever the work offset happens to sit well above the
+          // nominal 5 mm — which then searches too little to reach the
+          // surface. This routine's precondition is a Z zeroed just before it
+          // runs, same as `zeroZ`.
+          await this.sendAndWait(`G0 Z5.000 F3000`);
+          await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
           const contactZ = await this.probePoint(20, 50);
-          await this.sendAndWait('G0 Z5.000 F1000');
+          const retractZ = await this.clampedRetractZ(5);
+          await this.sendAndWait(`G0 Z${retractZ.toFixed(3)} F1000`);
 
           if (contactZ === null) {
             missed++;
@@ -2088,7 +2140,8 @@ class WebSerialManager {
     }
 
     if (isLive) {
-      await this.sendAndWait('G0 Z10.000 F3000');
+      const finalRetractZ = await this.clampedRetractZ(10);
+      await this.sendAndWait(`G0 Z${finalRetractZ.toFixed(3)} F3000`);
       if (missed > 0) {
         this.updateState({
           lastError:

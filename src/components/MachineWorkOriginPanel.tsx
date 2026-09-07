@@ -154,10 +154,11 @@ export const MachineWorkOriginPanel: React.FC<{
         <div className="flex items-start space-x-2 rounded-lg bg-amber-500/10 border border-amber-500/50 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span>
-            <strong className="font-bold">Z zero belongs to the previous tool.</strong> The bit that
-            just came out was a different length, so the datum on the machine is wrong by that
-            difference — and wrong in the direction of driving the new tool into the work. Touch off
-            again below, by hand or on the plate, before resuming.
+            <strong className="font-bold">Z zero is not confirmed for this session.</strong> The
+            controller may still be holding a datum from a previous session, tool, or piece of stock
+            — connecting, and a tool change mid-job, both leave it untrusted until you touch off
+            again. Any Z move (including Go To Zero, and starting a job) is blocked until you set Z
+            zero below, by hand or on the plate.
           </span>
         </div>
       )}
@@ -251,8 +252,12 @@ export const MachineWorkOriginPanel: React.FC<{
             </button>
             <button
               onClick={() => webSerialManager.gotoWorkOrigin()}
-              disabled={busy}
-              title="Retract and drive to the work origin to check where it landed"
+              disabled={busy || (showZProbe && staleZ)}
+              title={
+                showZProbe && staleZ
+                  ? 'Set Z zero below first — the retract this uses is clamped to never move down, but it will not lift until Z is trusted'
+                  : 'Retract and drive to the work origin to check where it landed'
+              }
               className={actionBtn}
             >
               <Navigation className="w-3.5 h-3.5 text-blue-400" />
