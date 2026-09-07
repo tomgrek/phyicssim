@@ -426,6 +426,11 @@ export interface PhysicsState {
   /** Draw every body as the edges of its triangles rather than a shaded solid. */
   wireframe: boolean;
   toggleWireframe: () => void;
+  /** Grid cell size in millimetres — 100mm reads a bench-scale part fine,
+   *  but makes a small part (a relief carve, a coin) look tiny by comparison.
+   *  Purely a display setting: never touches any body's actual dimensions. */
+  gridCellSizeMm: number;
+  setGridCellSizeMm: (mm: number) => void;
 
   // --- Coloring -----------------------------------------------------------
   //
@@ -816,6 +821,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   wireframe: false,
   toggleWireframe: () => set((state) => ({ wireframe: !state.wireframe })),
+  gridCellSizeMm: 100,
+  setGridCellSizeMm: (mm) => set({ gridCellSizeMm: mm }),
 
   paintMode: false,
   paintColor: [0.91, 0.30, 0.24],
@@ -940,6 +947,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       selectedNodeId: null,
       activePreset: name,
       sceneGraph: scene,
+      // Most presets rely on the default bench-scale framing, but a small
+      // preset (e.g. california_relief) can specify its own so it doesn't
+      // read as a speck at that distance — cleared here so a stale override
+      // from a previous preset doesn't leak into one that didn't ask for it.
+      cameraOverride: (preset as any).camera ?? null,
     });
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));

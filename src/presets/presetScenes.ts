@@ -3001,7 +3001,13 @@ export const PRESETS = {
   california_relief: {
     name: 'California Relief Map',
     emoji: '🗺️',
-    scene: californiaReliefPreset
+    scene: californiaReliefPreset,
+    // The default camera framing is tuned for bench-scale objects (the grid's
+    // cells are 100mm, the camera sits 800mm out) — this carve is a 50x40x40mm
+    // block, so it reads as a speck at that distance. A closer default view is
+    // purely a camera position, not a scale on the model: the carve's real
+    // millimetre dimensions (what the exporter cares about) are untouched.
+    camera: { position: [0.05, -0.09, 0.07], target: [0, 0, 0.02] }
   },
   mega_bust_studio: {
     name: 'Mega Bust & Stress Studio',

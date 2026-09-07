@@ -1011,6 +1011,7 @@ function App() {
     cameraView, setCameraView,
     printAnalysisEnabled, togglePrintAnalysis,
     wireframe, toggleWireframe, paintMode,
+    gridCellSizeMm, setGridCellSizeMm,
     sceneGraph, selectedNodeId, setSelectedNodeId,
     updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, updateScene,
     resetSimulation, updateNodePos,
@@ -3019,15 +3020,15 @@ function App() {
               shadow-camera-far={12}
               shadow-normalBias={0.03}
             />
-            <Grid 
-              infiniteGrid 
-              fadeDistance={12} 
+            <Grid
+              infiniteGrid
+              fadeDistance={12}
               fadeStrength={1}
-              sectionSize={0.5}
-              cellSize={0.1}
-              cellColor={darkMode ? '#334155' : '#cbd5e1'} 
-              sectionColor={darkMode ? '#64748b' : '#94a3b8'} 
-              position={[0, -0.005, 0]} 
+              sectionSize={(gridCellSizeMm / 1000) * 5}
+              cellSize={gridCellSizeMm / 1000}
+              cellColor={darkMode ? '#334155' : '#cbd5e1'}
+              sectionColor={darkMode ? '#64748b' : '#94a3b8'}
+              position={[0, -0.005, 0]}
             />
 
             {/* Every geom already casts and receives, but until now nothing on
@@ -3160,6 +3161,17 @@ function App() {
               <Grid3x3 className="w-3 h-3" />
               Wireframe
             </button>
+            <select
+              value={gridCellSizeMm}
+              onChange={(e) => setGridCellSizeMm(parseFloat(e.target.value))}
+              title="Grid cell size — a display setting only, does not change any body's dimensions"
+              className="px-1.5 py-1 rounded text-[10px] font-bold tracking-wide bg-transparent text-slate-650 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer outline-none border-none"
+            >
+              <option value={0.1}>0.1mm grid</option>
+              <option value={1}>1mm grid</option>
+              <option value={10}>10mm grid</option>
+              <option value={100}>100mm grid</option>
+            </select>
 
           </div>
 
