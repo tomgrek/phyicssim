@@ -1578,7 +1578,7 @@ export function generateReliefCarveGcode(
    * stock's top face on the first layer, the level the previous layer left on
    * every one after it.
    */
-  const leadIn = (path: PathPoint[], entryZ: number, rate: number) => {
+  const leadIn = (path: PathPoint[], entryZ: number, rate: number, returnRate = 0) => {
     const head = path[0];
     const approachZ = Math.min(opts.safeZ, entryZ + 0.5);
     rapidTo(head.x, head.y, approachZ);
@@ -1630,13 +1630,27 @@ export function generateReliefCarveGcode(
       cutTo(w.x, w.y, z);
       gcode.push(`G1 X${f(w.x)} Y${f(w.y)} Z${f(z)} F${Math.round(rate)}`);
     }
-    // Back to the head at full depth, clearing what the ramp rode over.
+    /*
+     * Back to the head at full depth, clearing what the ramp rode over.
+     *
+     * At the cutting feed, not the plunge rate. GRBL holds the last F it was
+     * given, so with no F word here the whole return leg inherited the ramp's
+     * plunge rate — which is chosen for driving a tool downwards and is far
+     * slower than the same tool wants for an ordinary cut sideways. It is
+     * stated once and then held, the same way the passes themselves do it.
+     */
+    let stated = false;
+    const withRate = () => {
+      if (returnRate <= 0 || stated) return '';
+      stated = true;
+      return ` F${Math.round(returnRate)}`;
+    };
     for (let i = walk.length - 2; i >= 0; i--) {
       cutTo(walk[i].x, walk[i].y, walk[i].pz);
-      gcode.push(`G1 X${f(walk[i].x)} Y${f(walk[i].y)} Z${f(walk[i].pz)}`);
+      gcode.push(`G1 X${f(walk[i].x)} Y${f(walk[i].y)} Z${f(walk[i].pz)}${withRate()}`);
     }
     cutTo(head.x, head.y, head.z);
-    gcode.push(`G1 X${f(head.x)} Y${f(head.y)} Z${f(head.z)}`);
+    gcode.push(`G1 X${f(head.x)} Y${f(head.y)} Z${f(head.z)}${withRate()}`);
   };
 
   gcode.push('; ---------------------------------------------------------------');
@@ -1682,6 +1696,17 @@ export function generateReliefCarveGcode(
   const roughRad = Math.max(0.05, opts.roughingToolDiaMm / 2);
   const allowance = Math.max(0, opts.roughingAllowanceMm);
 
+  /**
+   * How high the material still stands at a point once roughing has been over
+   * it, which is the height anything entering the cut there has to start from.
+   *
+   * Without roughing nothing has been taken off, so the answer is the stock's
+   * top face — which is what this is until the roughing block below replaces
+   * it. It is declared out here because the finishing pass needs it and the map
+   * it reads lives inside `if (opts.roughingEnabled)`.
+   */
+  let materialLevelAt: (x: number, y: number) => number = () => 0;
+
   if (opts.roughingEnabled) {
     const roughMap = dilateForTool(surface, roughRad, false, bodyFor(opts.roughingToolDiaMm, 0, 0));
     const adaptive = opts.roughingStrategy === 'adaptive';
@@ -1711,6 +1736,14 @@ export function generateReliefCarveGcode(
       if (roughMap.z[i] < deepest) deepest = roughMap.z[i];
     }
     const roughFloor = deepest + allowance;
+
+    // What the roughing pass leaves standing: its own reachable surface plus
+    // the allowance, never deeper than the floor it is allowed to reach and
+    // never above the stock's top face. `roughMap` is already dilated for the
+    // roughing cutter, so a pocket it cannot get into reads back high here —
+    // which is the answer wanted, since the material really is still there.
+    materialLevelAt = (x, y) =>
+      Math.min(0, Math.max(roughFloor, sampleHeightmap(roughMap, x, y) + allowance));
 
     // The last layer sits exactly at the floor, where the only material left to
     // take is at the single deepest point of the relief — so it clears next to
@@ -1838,7 +1871,7 @@ export function generateReliefCarveGcode(
 
           // Ramp in along the ring rather than plunging: the centre of an end
           // mill cuts at zero surface speed, and a deep layer pulls hard on it.
-          leadIn(path, Math.min(0, layerZ + layerStep), opts.roughingPlungeRate);
+          leadIn(path, Math.min(0, layerZ + layerStep), opts.roughingPlungeRate, feed);
 
           for (let i = 1; i < path.length; i++) {
             cutTo(path[i].x, path[i].y, layerZ);
@@ -1876,7 +1909,12 @@ export function generateReliefCarveGcode(
             const last = run[run.length - 1];
             // The layer above is what the tool is dropping through, so that is
             // where the ramp starts — one stepdown, not the whole depth so far.
-            leadIn([run[0], last], Math.min(0, layerZ + layerStep), opts.roughingPlungeRate);
+            leadIn(
+              [run[0], last],
+              Math.min(0, layerZ + layerStep),
+              opts.roughingPlungeRate,
+              opts.roughingFeedrate
+            );
 
             cutTo(last.x, last.y, layerZ);
             gcode.push(`G1 X${f(last.x)} Y${f(last.y)} F${Math.round(opts.roughingFeedrate)}`);
@@ -2076,7 +2114,26 @@ export function generateReliefCarveGcode(
         if (pass.length < 2) continue;
         finishingRasterLines++;
 
-        leadIn(pass, Math.min(0, prevLimit), opts.finishingPlungeRate);
+        /*
+         * Where the material actually is at the head of this pass.
+         *
+         * This used to be told `Z0` — the stock's top face — whatever roughing
+         * had already taken off. With a 10 mm relief and roughing on, the real
+         * material stands at about `surface + 0.5 mm`, so the ramp was handed a
+         * 10 mm drop instead of half a millimetre and spent 37 mm descending
+         * through open air at the plunge rate before it touched anything, then
+         * retraced the same 37 mm on the way back. About fifteen seconds a run,
+         * for roughly one second of cutting, across every raster line in the
+         * job — which is most of where "it spent a long time cutting air" came
+         * from.
+         *
+         * The lower of the two is what is standing: whichever of roughing and
+         * the finishing layer above cut deepest here is the one that decides
+         * the height, and cutting the same place twice does not raise it.
+         */
+        const head = pass[0];
+        const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
+        leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
 
         // GRBL keeps the last feedrate, so it is only stated when it changes.
         let first = true;
