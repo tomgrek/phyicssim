@@ -592,7 +592,7 @@ export interface PhysicsState {
   /** Mirror every placement across this axis through the body origin. */
   latticeMirror: LatticeAxis | null;
   /** What the panel shows: counts and whether the surface has closed. */
-  latticeStats: { vertices: number; faces: number; quads: number; tris: number; watertight: boolean } | null;
+  latticeStats: { vertices: number; faces: number; quads: number; tris: number; creases: number; watertight: boolean } | null;
   setLatticeNodeId: (id: string | null) => void;
   setLatticeTool: (tool: LatticeTool) => void;
   setLatticePlane: (plane: { axis: LatticeAxis; index: number }) => void;
@@ -600,7 +600,7 @@ export interface PhysicsState {
   nudgeLatticePlane: (delta: number) => void;
   setLatticeSnap: (snap: SnapMultiple) => void;
   setLatticeMirror: (axis: LatticeAxis | null) => void;
-  setLatticeStats: (stats: { vertices: number; faces: number; quads: number; tris: number; watertight: boolean } | null) => void;
+  setLatticeStats: (stats: { vertices: number; faces: number; quads: number; tris: number; creases: number; watertight: boolean } | null) => void;
   /**
    * Writes a cage to a node and rebuilds its mesh from it, in one go.
    *

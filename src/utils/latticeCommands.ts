@@ -23,9 +23,10 @@
 // ---------------------------------------------------------------------------
 
 import {
-  addFace, coordOf, extrudeFace, faceNormal, findFace, findMirrorFace, findVertex,
-  isWatertight, latticeBounds, latticeStats, mirrorFace, removeFace, vertexAt,
-  dominantAxis, type Axis, type Lattice, type LatticeCoord,
+  addFace, coordOf, edgeKey, extrudeFace, faceNormal, findFace, findMirrorFace, findVertex,
+  isCrease, isWatertight, latticeBounds, latticeStats, mirrorCoord, mirrorFace,
+  removeFace, setCrease, vertexAt, dominantAxis,
+  type Axis, type Lattice, type LatticeCoord,
 } from './latticeMesh';
 
 /** Millimetres per grid step. */
@@ -188,6 +189,53 @@ export function extrudeMm(
   };
 }
 
+/**
+ * Marks edges sharp, or lets them round off again.
+ *
+ * Each edge is a PAIR of corners in millimetres. Without this, smoothing is all
+ * or nothing — a cage is either a faceted box or a pebble, and almost nothing
+ * worth making is either.
+ */
+export function sharpenEdgesMm(
+  lattice: Lattice,
+  edges: unknown,
+  sharp: boolean,
+  mirror?: Axis,
+): { changed: number; skipped: FaceReport[] } {
+  if (!Array.isArray(edges) || edges.length === 0) {
+    throw new Error('edges must be a list of edges, each a pair of corners [[x, y, z], [x, y, z]] in millimetres');
+  }
+  let changed = 0;
+  const skipped: FaceReport[] = [];
+
+  for (const edge of edges) {
+    if (!Array.isArray(edge) || edge.length !== 2 || !edge.every(validPoint)) {
+      skipped.push({ face: edge as number[][], reason: 'an edge is exactly two corners, each [x, y, z] in millimetres' });
+      continue;
+    }
+    const verts = edge.map((point) => {
+      const [i, j, k] = coordFromMm(point, lattice.unit);
+      return findVertex(lattice, i, j, k);
+    });
+    if (verts.some((v) => v === -1)) {
+      skipped.push({ face: edge, reason: 'no corner of the shape is at one of those points' });
+      continue;
+    }
+    if (setCrease(lattice, verts[0], verts[1], sharp)) changed++;
+    else skipped.push({ face: edge, reason: sharp ? 'no face runs along that edge, or it is sharp already' : 'that edge was not sharp' });
+
+    if (mirror) {
+      const reflected = verts.map((v) => {
+        const [i, j, k] = mirrorCoord(coordOf(lattice, v), mirror);
+        return findVertex(lattice, i, j, k);
+      });
+      if (!reflected.some((v) => v === -1)) setCrease(lattice, reflected[0], reflected[1], sharp);
+    }
+  }
+
+  return { changed, skipped };
+}
+
 /** Counts, bounds and health — the reply every operation ends with. */
 export function latticeSummary(lattice: Lattice) {
   const stats = latticeStats(lattice);
@@ -213,14 +261,27 @@ export function latticeSummary(lattice: Lattice) {
  * which is not true of any other geometry in this app.
  */
 export function describeLattice(lattice: Lattice) {
-  const faces: { corners: number[][]; normal: string }[] = [];
+  const faces: { corners: number[][]; normal: string; sharpEdges: number[][][] }[] = [];
   lattice.faces.forEach((verts, f) => {
     if (!verts) return;
     const normal = faceNormal(lattice, f);
     const facing = normal ? dominantAxis(normal) : null;
+    // Reported per face rather than as a separate list, because a crease is
+    // only meaningful as an edge OF something — and a caller that has just read
+    // a face has the corners it needs to pass straight back.
+    const sharpEdges: number[][][] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < verts.length; i++) {
+      const a = verts[i];
+      const b = verts[(i + 1) % verts.length];
+      if (!isCrease(lattice, a, b) || seen.has(edgeKey(a, b))) continue;
+      seen.add(edgeKey(a, b));
+      sharpEdges.push([mmFromCoord(coordOf(lattice, a), lattice.unit), mmFromCoord(coordOf(lattice, b), lattice.unit)]);
+    }
     faces.push({
       corners: verts.map((v) => mmFromCoord(coordOf(lattice, v), lattice.unit)),
       normal: facing ? `${facing.sign > 0 ? '+' : '-'}${facing.axis}` : 'degenerate',
+      sharpEdges,
     });
   });
   return { ...latticeSummary(lattice), watertight: isWatertight(lattice), faces };

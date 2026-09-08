@@ -56,6 +56,17 @@ export interface Lattice {
   faces: (number[] | null)[];
   /** vertex index -> the faces using it. Maintained as faces come and go. */
   vertexFaces: Map<number, Set<number>>;
+  /**
+   * Edges that stay sharp when the cage is smoothed, as "lower:higher" vertex
+   * indices.
+   *
+   * Without these, smoothing is all or nothing: every level of Catmull-Clark
+   * rounds every edge, so a cage either stays a faceted box or becomes a
+   * pebble. Almost nothing anybody wants to make is one of those. A bracket is
+   * flat faces with rounded corners; a housing is a curved shell with a crisp
+   * rim. A crease is what lets one cage be both.
+   */
+  creases: Set<string>;
   /** Bumped on any change, so caches can tell one cage from another. */
   revision: number;
 }
@@ -104,6 +115,7 @@ export function createLattice(unit = DEFAULT_UNIT): Lattice {
     index: new Map(),
     faces: [],
     vertexFaces: new Map(),
+    creases: new Set(),
     revision: 0,
   };
 }
@@ -240,6 +252,10 @@ export function removeFace(lattice: Lattice, face: number): boolean {
   if (!verts) return false;
   unlink(lattice, face, verts);
   lattice.faces[face] = null;
+  // A crease on an edge nothing runs along any more is a stale pair of numbers;
+  // it would come back to life pointing at the wrong edge the next time a face
+  // happened to reuse those corners.
+  pruneCreases(lattice);
   lattice.revision++;
   return true;
 }
@@ -306,6 +322,17 @@ function mergeVertex(lattice: Lattice, from: number, into: number) {
   }
   lattice.vertexFaces.delete(from);
 
+  // Creases follow the weld: an edge into the merged corner is now an edge into
+  // the one it merged with, and an edge that collapsed to a point is gone.
+  for (const key of [...lattice.creases]) {
+    const [a, b] = key.split(':').map(Number);
+    if (a !== from && b !== from) continue;
+    lattice.creases.delete(key);
+    const mapped = edgeKey(a === from ? into : a, b === from ? into : b);
+    if (!mapped.startsWith(`${into}:${into}`)) lattice.creases.add(mapped);
+  }
+  pruneCreases(lattice);
+
   const [fi, fj, fk] = coordOf(lattice, from);
   // The orphan keeps its slot but leaves the index, so nothing finds it again
   // and no face index has to shift. `toSceneGeom` drops unused vertices anyway.
@@ -319,10 +346,76 @@ export function removeVertex(lattice: Lattice, vertex: number): boolean {
   if (!users && findVertex(lattice, ...coordOf(lattice, vertex)) !== vertex) return false;
   for (const f of [...(users ?? [])]) removeFace(lattice, f);
   lattice.vertexFaces.delete(vertex);
+  for (const key of [...lattice.creases]) {
+    const [a, b] = key.split(':').map(Number);
+    if (a === vertex || b === vertex) lattice.creases.delete(key);
+  }
   const [i, j, k] = coordOf(lattice, vertex);
   if (lattice.index.get(key(i, j, k)) === vertex) lattice.index.delete(key(i, j, k));
   lattice.revision++;
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Creases
+// ---------------------------------------------------------------------------
+
+/** The canonical key for an undirected edge. */
+export const edgeKey = (a: number, b: number) => (a < b ? `${a}:${b}` : `${b}:${a}`);
+
+export function isCrease(lattice: Lattice, a: number, b: number): boolean {
+  return lattice.creases.has(edgeKey(a, b));
+}
+
+/**
+ * Marks an edge sharp, or lets it round off again.
+ *
+ * Refused for an edge no face uses: a crease on nothing would survive in the
+ * saved cage as a pair of numbers that mean less and less as the shape around
+ * them changes.
+ */
+export function setCrease(lattice: Lattice, a: number, b: number, sharp: boolean): boolean {
+  if (a === b) return false;
+  if (sharp && !edgeExists(lattice, a, b)) return false;
+  const key = edgeKey(a, b);
+  const had = lattice.creases.has(key);
+  if (had === sharp) return false;
+  if (sharp) lattice.creases.add(key);
+  else lattice.creases.delete(key);
+  lattice.revision++;
+  return true;
+}
+
+/** Whether some face runs along this edge. */
+export function edgeExists(lattice: Lattice, a: number, b: number): boolean {
+  for (const f of lattice.vertexFaces.get(a) ?? []) {
+    const verts = lattice.faces[f];
+    if (!verts) continue;
+    for (let i = 0; i < verts.length; i++) {
+      const p = verts[i];
+      const q = verts[(i + 1) % verts.length];
+      if ((p === a && q === b) || (p === b && q === a)) return true;
+    }
+  }
+  return false;
+}
+
+/** Every crease still attached to a face, as vertex pairs. */
+export function creaseEdges(lattice: Lattice): number[] {
+  const out: number[] = [];
+  for (const key of lattice.creases) {
+    const [a, b] = key.split(':').map(Number);
+    if (edgeExists(lattice, a, b)) out.push(a, b);
+  }
+  return out;
+}
+
+/** Drops creases whose edge no longer exists, after faces have been removed. */
+function pruneCreases(lattice: Lattice) {
+  for (const key of [...lattice.creases]) {
+    const [a, b] = key.split(':').map(Number);
+    if (!edgeExists(lattice, a, b)) lattice.creases.delete(key);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +643,7 @@ export function latticeStats(lattice: Lattice) {
     faces: faceCount(lattice),
     quads,
     tris,
+    creases: creaseEdges(lattice).length / 2,
     watertight: isWatertight(lattice),
   };
 }
@@ -576,7 +670,14 @@ export function toPolyMesh(lattice: Lattice): PolyMesh {
     if (!verts) continue;
     faces.push(verts.map((v) => remap.get(v)!));
   }
-  return { positions, faces };
+  const creases = new Set<string>();
+  for (const key of lattice.creases) {
+    const [a, b] = key.split(':').map(Number);
+    const ra = remap.get(a);
+    const rb = remap.get(b);
+    if (ra !== undefined && rb !== undefined) creases.add(ra < rb ? `${ra}:${rb}` : `${rb}:${ra}`);
+  }
+  return { positions, faces, creases };
 }
 
 /** Triangulates a polygon by fanning from its first corner. */
@@ -712,6 +813,8 @@ export interface LatticeCage {
   /** Face corners back to back; `faceSizes` says where each one ends. */
   faces: number[];
   faceSizes: number[];
+  /** Sharp edges, two vertex indices per crease. Absent on cages saved before them. */
+  creases?: number[];
 }
 
 /**
@@ -738,7 +841,14 @@ export function serializeCage(lattice: Lattice): LatticeCage {
     faceSizes.push(verts.length);
     for (const v of verts) faces.push(remap.get(v)!);
   }
-  return { unit: lattice.unit, coords, faces, faceSizes };
+  const creases: number[] = [];
+  for (const key of lattice.creases) {
+    const [a, b] = key.split(':').map(Number);
+    const ra = remap.get(a);
+    const rb = remap.get(b);
+    if (ra !== undefined && rb !== undefined) creases.push(ra, rb);
+  }
+  return { unit: lattice.unit, coords, faces, faceSizes, creases };
 }
 
 export function deserializeCage(cage: LatticeCage): Lattice {
@@ -753,6 +863,12 @@ export function deserializeCage(cage: LatticeCage): Lattice {
     for (let i = 0; i < size; i++) verts.push(vertices[cage.faces[at + i]]);
     at += size;
     addFace(lattice, verts);
+  }
+  // After the faces, so `setCrease` can check the edge is really there — a cage
+  // written by an older version has no creases at all, which is simply a cage
+  // where nothing is sharp.
+  for (let i = 0; i + 1 < (cage.creases?.length ?? 0); i += 2) {
+    setCrease(lattice, vertices[cage.creases![i]], vertices[cage.creases![i + 1]], true);
   }
   return lattice;
 }
@@ -774,6 +890,7 @@ export function cloneLattice(lattice: Lattice): Lattice {
   copy.faces = lattice.faces.map((face) => (face ? [...face] : null));
   copy.vertexFaces = new Map();
   for (const [v, set] of lattice.vertexFaces) copy.vertexFaces.set(v, new Set(set));
+  copy.creases = new Set(lattice.creases);
   copy.revision = lattice.revision;
   return copy;
 }
@@ -786,5 +903,6 @@ export function restoreLattice(lattice: Lattice, snapshot: Lattice) {
   lattice.faces = snapshot.faces.map((face) => (face ? [...face] : null));
   lattice.vertexFaces = new Map();
   for (const [v, set] of snapshot.vertexFaces) lattice.vertexFaces.set(v, new Set(set));
+  lattice.creases = new Set(snapshot.creases);
   lattice.revision++;
 }

@@ -19,7 +19,9 @@
 //
 // Boundaries are subdivided as curves rather than pulled towards the interior,
 // so an open cage keeps its outline instead of shrinking away from it — an
-// open surface is a normal thing to be halfway through making here.
+// open surface is a normal thing to be halfway through making here. Creased
+// edges are treated the same way, which is what lets one cage hold a rounded
+// face and a crisp edge at once.
 // ---------------------------------------------------------------------------
 
 export interface PolyMesh {
@@ -27,6 +29,16 @@ export interface PolyMesh {
   positions: number[];
   /** Vertex indices per face, any number of corners, consistently wound. */
   faces: number[][];
+  /**
+   * Edges to keep sharp, as "lower:higher" vertex indices.
+   *
+   * Without them smoothing is all or nothing, and almost nothing worth making
+   * is either: a bracket is flat faces with rounded corners, a housing is a
+   * curved shell with a crisp rim. A creased edge is subdivided as a curve in
+   * its own right — exactly what a border already does — so the surface either
+   * side of it rounds off while the edge itself stays put.
+   */
+  creases?: Set<string>;
 }
 
 const edgeKey = (a: number, b: number) => (a < b ? `${a}:${b}` : `${b}:${a}`);
@@ -39,6 +51,7 @@ interface EdgeRecord {
 
 function subdivideOnce(mesh: PolyMesh): PolyMesh {
   const { positions, faces } = mesh;
+  const creases = mesh.creases ?? new Set<string>();
   const at = (v: number): [number, number, number] => [positions[v * 3], positions[v * 3 + 1], positions[v * 3 + 2]];
 
   // --- face points -------------------------------------------------------
@@ -72,10 +85,11 @@ function subdivideOnce(mesh: PolyMesh): PolyMesh {
 
   // --- edge points -------------------------------------------------------
   const edgePointIndex = new Map<string, number>();
+  const isSharp = (edge: EdgeRecord) => edge.faces.length !== 2 || creases.has(edgeKey(edge.a, edge.b));
   for (const [k, edge] of edges) {
     const pa = at(edge.a);
     const pb = at(edge.b);
-    if (edge.faces.length === 2) {
+    if (!isSharp(edge)) {
       const f1 = facePoints[edge.faces[0]];
       const f2 = facePoints[edge.faces[1]];
       edgePointIndex.set(k, push([
@@ -84,8 +98,9 @@ function subdivideOnce(mesh: PolyMesh): PolyMesh {
         (pa[2] + pb[2] + f1[2] + f2[2]) / 4,
       ]));
     } else {
-      // A boundary edge (or a non-manifold one, treated the same): the midpoint,
-      // which is what makes the border behave like a subdivided curve.
+      // A sharp edge — a border, a non-manifold edge, or one the user creased:
+      // the midpoint, which is what makes it behave like a subdivided curve
+      // rather than being pulled towards the faces either side of it.
       edgePointIndex.set(k, push([(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2, (pa[2] + pb[2]) / 2]));
     }
   }
@@ -106,7 +121,7 @@ function subdivideOnce(mesh: PolyMesh): PolyMesh {
   for (let v = 0; v < vertexCount; v++) {
     const p = at(v);
     const around = incidentEdges[v];
-    const boundary = around.filter((e) => e.faces.length !== 2);
+    const sharp = around.filter(isSharp);
 
     if (around.length === 0) {
       // An orphan. Nothing references it, but dropping it here would shift every
@@ -115,16 +130,17 @@ function subdivideOnce(mesh: PolyMesh): PolyMesh {
       continue;
     }
 
-    if (boundary.length > 0) {
-      if (boundary.length !== 2) {
-        // A corner where three or more borders meet has no well-defined crease
-        // to run along, so it is pinned. Pinning is the conservative choice:
-        // it keeps a sharp corner sharp instead of melting it in an arbitrary
-        // direction.
+    if (sharp.length > 0) {
+      if (sharp.length !== 2) {
+        // A corner where three or more sharp edges meet has no single crease to
+        // run along, so it is pinned. Pinning is the conservative choice: it
+        // keeps a sharp corner sharp rather than melting it in an arbitrary
+        // direction — and it is why creasing the three edges at the corner of a
+        // box holds that corner square while the rest of it rounds.
         movedIndex[v] = push(p);
         continue;
       }
-      const midpoints = boundary.map((e) => {
+      const midpoints = sharp.map((e) => {
         const other = e.a === v ? e.b : e.a;
         const q = at(other);
         return [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2, (p[2] + q[2]) / 2] as [number, number, number];
@@ -164,6 +180,17 @@ function subdivideOnce(mesh: PolyMesh): PolyMesh {
   // One quad per original corner, wound the same way round as the face it came
   // from, so a consistently wound cage stays consistently wound however many
   // times it is subdivided.
+  // A creased edge subdivides into two creased edges, so sharpness survives
+  // however many levels are applied — losing it at level 2 would make the
+  // setting a lie at exactly the level people use.
+  const childCreases = new Set<string>();
+  for (const edge of edges.values()) {
+    if (!creases.has(edgeKey(edge.a, edge.b))) continue;
+    const mid = edgePointIndex.get(edgeKey(edge.a, edge.b))!;
+    childCreases.add(edgeKey(movedIndex[edge.a], mid));
+    childCreases.add(edgeKey(mid, movedIndex[edge.b]));
+  }
+
   const newFaces: number[][] = [];
   faces.forEach((face, f) => {
     const centre = push(facePoints[f]);
@@ -180,7 +207,7 @@ function subdivideOnce(mesh: PolyMesh): PolyMesh {
     }
   });
 
-  return { positions: out, faces: newFaces };
+  return { positions: out, faces: newFaces, creases: childCreases };
 }
 
 /**

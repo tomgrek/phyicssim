@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   addFacesMm, removeFacesMm, extrudeMm, findFaceMm, coordFromMm, mmFromCoord,
-  describeLattice, latticeSummary,
+  describeLattice, latticeSummary, sharpenEdgesMm,
 } from '../src/utils/latticeCommands';
 import { boxLattice, createLattice, DEFAULT_UNIT, faceCount, findVertex, isWatertight } from '../src/utils/latticeMesh';
 
@@ -113,5 +113,50 @@ describe('reading a shape back', () => {
 
   it('summarises an empty cage without falling over', () => {
     expect(latticeSummary(createLattice())).toMatchObject({ faces: 0, bounds: null, sizeMm: null });
+  });
+});
+
+describe('creasing over MCP', () => {
+  const topFace = [[-10, -10, 10], [10, -10, 10], [10, 10, 10], [-10, 10, 10]];
+
+  it('marks an edge sharp and reports it back on the face it belongs to', () => {
+    const l = boxLattice(DEFAULT_UNIT, 100); // 20 mm cube
+    const edge = [topFace[0], topFace[1]];
+    expect(sharpenEdgesMm(l, [edge], true).changed).toBe(1);
+    expect(latticeSummary(l).creases).toBe(1);
+
+    const described = describeLattice(l);
+    const withCrease = described.faces.filter((f) => f.sharpEdges.length > 0);
+    // One edge, shared by the two faces that meet along it.
+    expect(withCrease).toHaveLength(2);
+    // And the corners it reports are the ones that were sent in.
+    expect(withCrease[0].sharpEdges[0].flat()).toEqual(expect.arrayContaining(edge.flat()));
+  });
+
+  it('takes a crease off again', () => {
+    const l = boxLattice(DEFAULT_UNIT, 100);
+    const edge = [topFace[0], topFace[1]];
+    sharpenEdgesMm(l, [edge], true);
+    expect(sharpenEdgesMm(l, [edge], false).changed).toBe(1);
+    expect(latticeSummary(l).creases).toBe(0);
+  });
+
+  it('explains what it could not crease', () => {
+    const l = boxLattice(DEFAULT_UNIT, 100);
+    const result = sharpenEdgesMm(l, [
+      [topFace[0], topFace[2]],           // a diagonal: no face runs along it
+      [[99, 99, 99], [98, 99, 99]],       // nothing is there at all
+      [topFace[0]],                       // not an edge
+    ], true);
+    expect(result.changed).toBe(0);
+    expect(result.skipped).toHaveLength(3);
+    expect(result.skipped[1].reason).toMatch(/no corner of the shape/);
+    expect(result.skipped[2].reason).toMatch(/exactly two corners/);
+  });
+
+  it('mirrors a crease when asked', () => {
+    const l = boxLattice(DEFAULT_UNIT, 100);
+    sharpenEdgesMm(l, [[[-10, -10, 10], [-10, 10, 10]]], true, 'x');
+    expect(latticeSummary(l).creases).toBe(2);
   });
 });

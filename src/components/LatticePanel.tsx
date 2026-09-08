@@ -17,7 +17,7 @@
 import { useEffect } from 'react';
 import {
   PenLine, MousePointer2, MoveVertical, Grid3x3, FlipHorizontal2,
-  Boxes, TriangleAlert, Check, Spline,
+  Boxes, TriangleAlert, Check, Spline, Scissors,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { SceneNode } from '../types/scene';
@@ -33,7 +33,7 @@ interface ToolDefinition {
 
 const TOOLS: ToolDefinition[] = [
   { tool: 'place', label: 'Place', key: '1', icon: PenLine, hint: 'Click grid points to draw a face. Four corners closes it automatically; Enter closes a triangle; Esc abandons it.' },
-  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it, or click a face to select it. F turns a face inside out.' },
+  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it; click a face or an edge to select it. S keeps an edge sharp under smoothing, F turns a face inside out.' },
   { tool: 'extrude', label: 'Extrude', key: '3', icon: MoveVertical, hint: 'Drag a face along its own axis to push it out in whole grid steps — the fastest way to get from a plate to a solid.' },
 ];
 
@@ -238,7 +238,7 @@ export function LatticePanel() {
               onClick={() => latticeNodeId && setLatticeSubdiv(latticeNodeId, level)}
               title={level === 0
                 ? 'Show and export the cage itself — flat faces and hard edges.'
-                : `Round the cage off with ${level} Catmull-Clark pass${level > 1 ? 'es' : ''}. The cage stays what you edit.`}
+                : `Round the cage off with ${level} Catmull-Clark pass${level > 1 ? 'es' : ''}. The cage stays what you edit, and edges marked sharp stay sharp.`}
               className={`flex-1 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
                 subdiv === level
                   ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300'
@@ -261,6 +261,20 @@ export function LatticePanel() {
               {stats.vertices} v · {stats.quads} q{stats.tris > 0 ? ` · ${stats.tris} t` : ''}
             </span>
           </div>
+          {stats.creases > 0 && (
+            <div
+              className="flex items-center justify-between text-[10px]"
+              title="Edges marked sharp. Smoothing rounds everything except these, which is what lets one cage be a curved shell with a crisp rim."
+            >
+              <span className="flex items-center gap-1 text-amber-500"><Scissors className="w-3 h-3" /> Sharp edges</span>
+              <span className="font-mono text-slate-600 dark:text-slate-300">{stats.creases}</span>
+            </div>
+          )}
+          {stats.creases === 0 && subdiv > 0 && (
+            <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
+              Smoothing rounds every edge. Select one and press <kbd className="font-mono">S</kbd> to hold it sharp.
+            </p>
+          )}
           {stats.tris > 0 && subdiv > 0 && (
             <div
               className="flex items-start gap-1 text-[10px] text-sky-600 dark:text-sky-400"

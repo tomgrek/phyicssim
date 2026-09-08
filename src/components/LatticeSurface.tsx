@@ -35,7 +35,7 @@ import { useStore } from '../store/useStore';
 import {
   deserializeCage, serializeCage, cloneLattice, restoreLattice,
   toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace,
-  removeFace, removeVertex, moveVertex, flipFace, extrudeFace, mirrorFace, findMirrorFace,
+  removeFace, removeVertex, moveVertex, flipFace, setCrease, isCrease, creaseEdges, edgeKey, extrudeFace, mirrorFace, findMirrorFace,
   faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord,
   AXIS_INDEX, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
 } from '../utils/latticeMesh';
@@ -148,6 +148,7 @@ export function LatticeSurface({
   const hoverVertex = hover ? findVertex(lattice, hover[0], hover[1], hover[2]) : -1;
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
   const [selectedVertex, setSelectedVertex] = useState<number | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<[number, number] | null>(null);
 
   /** What a drag is in the middle of doing, and what to rewind to per step. */
   const drag = useRef<
@@ -262,15 +263,45 @@ export function LatticeSurface({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lattice, revision, position]);
 
+  /**
+   * The cage's edges, in three sets.
+   *
+   * Sharp edges have to look different from soft ones. A crease changes the
+   * exported shape and nothing about the cage's position, so a cage that draws
+   * them identically leaves the single most consequential property of the model
+   * invisible until it is smoothed.
+   */
   const wire = useMemo(() => {
+    const build = (indices: number[]) => {
+      const values: number[] = [];
+      for (const v of indices) values.push(...position(v));
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(values, 3));
+      return geometry;
+    };
+    const creased = new Set<string>();
+    const sharp = creaseEdges(lattice);
+    for (let i = 0; i < sharp.length; i += 2) creased.add(edgeKey(sharp[i], sharp[i + 1]));
+
+    const soft: number[] = [];
     const edges = cageEdges(lattice);
-    const positions: number[] = [];
-    for (const v of edges) positions.push(...position(v));
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    return geometry;
+    for (let i = 0; i < edges.length; i += 2) {
+      if (creased.has(edgeKey(edges[i], edges[i + 1]))) continue;
+      soft.push(edges[i], edges[i + 1]);
+    }
+    return { soft: build(soft), sharp: build(sharp) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lattice, revision, position]);
+
+  const edgeHighlight = useMemo(() => {
+    if (!selectedEdge) return null;
+    const values: number[] = [];
+    for (const v of selectedEdge) values.push(...position(v));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(values, 3));
+    return geometry;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [position, revision, selectedEdge]);
 
   /** The cage's own vertices, as draggable handles. */
   const handles = useMemo(() => {
@@ -462,6 +493,44 @@ export function LatticeSurface({
     return coord;
   }, [plane, snap, unit]);
 
+  /**
+   * The cage edge the ray passes closest to, if it passes one closely enough.
+   *
+   * Edges are picked rather than selected from a list because the thing being
+   * marked sharp is a specific edge of a specific face, and there is no name for
+   * it — "the one running along the top of the front" is a sentence, not an
+   * identifier. Distance is measured between the ray and the SEGMENT, so a long
+   * edge is no easier to hit near its middle than at its ends.
+   */
+  const pickEdge = useCallback((ray: { origin: THREE.Vector3; direction: THREE.Vector3 }): [number, number] | null => {
+    const threshold = unit * snap * 0.4;
+    const edges = cageEdges(lattice);
+    let best: { edge: [number, number]; distance: number } | null = null;
+
+    for (let i = 0; i < edges.length; i += 2) {
+      const a = new THREE.Vector3(...position(edges[i]));
+      const b = new THREE.Vector3(...position(edges[i + 1]));
+      const ab = b.clone().sub(a);
+      const ao = a.clone().sub(ray.origin);
+      // Closest approach between the ray and the segment, clamped to both.
+      const abLen = ab.lengthSq();
+      const abd = ab.dot(ray.direction);
+      const denominator = abLen - abd * abd;
+      let t = 0;
+      if (Math.abs(denominator) > 1e-12) {
+        t = (abd * ao.dot(ray.direction) - ab.dot(ao)) / denominator;
+      }
+      t = Math.max(0, Math.min(1, t));
+      const onEdge = a.clone().addScaledVector(ab, t);
+      const along = onEdge.clone().sub(ray.origin).dot(ray.direction);
+      if (along <= 0) continue;
+      const distance = onEdge.distanceTo(ray.origin.clone().addScaledVector(ray.direction, along));
+      if (distance > threshold) continue;
+      if (!best || distance < best.distance) best = { edge: [edges[i], edges[i + 1]], distance };
+    }
+    return best ? best.edge : null;
+  }, [lattice, position, snap, unit]);
+
   /** What the pointer is on: something already there, or the work plane. */
   const resolve = useCallback((ray: { origin: THREE.Vector3; direction: THREE.Vector3 }): LatticeCoord | null =>
     pickExisting(ray) ?? snapFromPlane(ray),
@@ -647,8 +716,21 @@ export function LatticeSurface({
   }, [localRay, resolve, updateExtrude, updateVertexDrag]);
 
   const onPlaneDown = useCallback((event: ThreeEvent<PointerEvent>) => {
-    if (event.button !== 0 || tool !== 'place') return;
+    if (event.button !== 0) return;
     const ray = localRay(event);
+    if (tool === 'select') {
+      // Off the model entirely: an edge seen against the background is still an
+      // edge, and clicking empty space clears the selection.
+      const edge = ray && pickEdge(ray);
+      setSelectedEdge(edge);
+      if (edge) {
+        setSelectedFace(null);
+        setSelectedVertex(null);
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (tool !== 'place') return;
     const coord = ray && resolve(ray);
     if (!coord) return;
     event.stopPropagation();
@@ -658,7 +740,7 @@ export function LatticeSurface({
     const axis = AXIS_INDEX[plane.axis];
     if (coord[axis] !== plane.index) useStore.getState().setLatticePlane({ axis: plane.axis, index: coord[axis] });
     placeAt(coord);
-  }, [localRay, placeAt, plane, resolve, tool]);
+  }, [localRay, pickEdge, placeAt, plane, resolve, tool]);
 
   const onFaceDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0 || event.faceIndex == null) return;
@@ -666,10 +748,26 @@ export function LatticeSurface({
     if (face === undefined) return;
     if (tool === 'place') return; // placing goes through the plane, not the model
     event.stopPropagation();
+
+    // An edge near the click beats the face behind it. Aiming at an edge is
+    // aiming at a line a couple of pixels wide, and the face is a much bigger
+    // target sitting right behind it — without this the edge is unhittable.
+    if (tool === 'select') {
+      const ray = localRay(event);
+      const edge = ray && pickEdge(ray);
+      if (edge) {
+        setSelectedEdge(edge);
+        setSelectedFace(null);
+        setSelectedVertex(null);
+        return;
+      }
+    }
+
     setSelectedFace(face);
     setSelectedVertex(null);
+    setSelectedEdge(null);
     if (tool === 'extrude') beginExtrude(face, event);
-  }, [beginExtrude, pick.triangleFace, tool]);
+  }, [beginExtrude, localRay, pick.triangleFace, pickEdge, tool]);
 
   const onHandleDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0 || tool !== 'select' || event.instanceId == null) return;
@@ -678,6 +776,7 @@ export function LatticeSurface({
     event.stopPropagation();
     setSelectedVertex(vertex);
     setSelectedFace(null);
+    setSelectedEdge(null);
     beginVertexDrag(vertex, event);
   }, [beginVertexDrag, handles, tool]);
 
@@ -713,6 +812,7 @@ export function LatticeSurface({
         setPending([]);
         setSelectedFace(null);
         setSelectedVertex(null);
+        setSelectedEdge(null);
         return;
       }
       if (key === 'enter') {
@@ -758,6 +858,25 @@ export function LatticeSurface({
         setSelectedVertex(null);
         return;
       }
+      if (key === 's' && selectedEdge) {
+        // Sharpen. The one control that makes smoothing usable for a part
+        // rather than a pebble: everything rounds except what is marked.
+        const [a, b] = selectedEdge;
+        const sharp = !isCrease(lattice, a, b);
+        mutate(() => {
+          setCrease(lattice, a, b, sharp);
+          if (mirror) {
+            const reflect = (v: number) => {
+              const [i, j, k] = mirrorCoord(coordOf(lattice, v), mirror);
+              return findVertex(lattice, i, j, k);
+            };
+            const [ma, mb] = [reflect(a), reflect(b)];
+            if (ma !== -1 && mb !== -1) setCrease(lattice, ma, mb, sharp);
+          }
+        });
+        return;
+      }
+
       if (key === 'f' && selectedFace !== null) {
         // Flip: the fix for a face drawn from the wrong side, which is
         // otherwise invisible until it is exported and the solid has a hole.
@@ -773,7 +892,7 @@ export function LatticeSurface({
     // open and own the shape.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedFace, selectedVertex, snap]);
+  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdge, selectedFace, selectedVertex, snap]);
 
   // A drag left open by an unmount would leave the camera disabled.
   useEffect(() => () => {
@@ -844,9 +963,18 @@ export function LatticeSurface({
 
       <group ref={cageRef} position={[-solid.origin[0], -solid.origin[1], -solid.origin[2]]}>
       {/* The cage over it: the thing actually being edited. */}
-      <lineSegments geometry={wire} raycast={() => null}>
-        <lineBasicMaterial color="#0f172a" transparent opacity={0.55} depthTest={false} />
+      <lineSegments geometry={wire.soft} raycast={() => null}>
+        <lineBasicMaterial color="#0f172a" transparent opacity={0.5} depthTest={false} />
       </lineSegments>
+      {/* Creases, which smoothing will hold sharp. */}
+      <lineSegments geometry={wire.sharp} raycast={() => null}>
+        <lineBasicMaterial color="#f59e0b" depthTest={false} />
+      </lineSegments>
+      {edgeHighlight && (
+        <lineSegments geometry={edgeHighlight} raycast={() => null}>
+          <lineBasicMaterial color="#38bdf8" depthTest={false} />
+        </lineSegments>
+      )}
 
       {/* Face picking. Invisible, but not `visible={false}` — that would stop it
           being raycast, which is its entire job. */}

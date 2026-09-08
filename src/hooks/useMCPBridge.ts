@@ -23,7 +23,7 @@ import { SCULPT_BASES } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
 import {
-  addFacesMm, describeLattice, extrudeMm, latticeSummary, removeFacesMm,
+  addFacesMm, describeLattice, extrudeMm, latticeSummary, removeFacesMm, sharpenEdgesMm,
 } from '../utils/latticeCommands';
 import {
   boxLattice, cloneLattice, deserializeCage, serializeCage, DEFAULT_UNIT as LATTICE_UNIT,
@@ -977,6 +977,19 @@ export function useMCPBridge() {
           const result = removeFacesMm(lattice, faces, mirror as LatticeAxis | undefined);
           if (result.removed === 0) {
             return { ok: false, id: targetId, error: 'No face was removed', ...result, ...latticeSummary(lattice) };
+          }
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_SHARPEN': {
+          const { targetId, edges, sharp, mirror } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = sharpenEdgesMm(lattice, edges, sharp !== false, mirror as LatticeAxis | undefined);
+          if (result.changed === 0) {
+            return { ok: false, id: targetId, error: 'No edge changed', ...result, ...latticeSummary(lattice) };
           }
           pushLatticeHistory(targetId, before);
           commitLattice(node, lattice);

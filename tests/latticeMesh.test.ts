@@ -4,7 +4,7 @@ import {
   moveVertex, removeVertex, faceNormal, dominantAxis, extrudeFace, mirrorFace,
   isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges, coordOf,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
-  boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, type Lattice,
+  boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, type Lattice,
 } from '../src/utils/latticeMesh';
 import { meshCentroid } from '../src/utils/latticeMesh';
 import { subdivide } from '../src/utils/subdivide';
@@ -378,5 +378,97 @@ describe('centring on the centre of mass', () => {
     for (let i = 0; i < home.renderVertices.length; i++) {
       expect(moved.renderVertices[i]).toBeCloseTo(home.renderVertices[i], 9);
     }
+  });
+});
+
+describe('creases', () => {
+  /** The four vertices of the cube's top face, in order. */
+  function topRing(l: Lattice): number[] {
+    return [
+      findVertex(l, 0, 0, 1), findVertex(l, 1, 0, 1),
+      findVertex(l, 1, 1, 1), findVertex(l, 0, 1, 1),
+    ];
+  }
+
+  it('only marks edges a face actually runs along', () => {
+    const l = unitCube();
+    const [a, b, c] = topRing(l);
+    expect(setCrease(l, a, b, true)).toBe(true);   // an edge of the top face
+    expect(isCrease(l, b, a)).toBe(true);          // undirected
+    expect(setCrease(l, a, c, true)).toBe(false);  // a diagonal: no face runs along it
+    expect(setCrease(l, a, b, true)).toBe(false);  // already sharp
+    expect(setCrease(l, a, b, false)).toBe(true);
+    expect(isCrease(l, a, b)).toBe(false);
+  });
+
+  it('holds a creased edge in place while the rest rounds off', () => {
+    const plain = subdivide(toPolyMesh(unitCube(0.01)), 2);
+
+    const creased = unitCube(0.01);
+    const ring = topRing(creased);
+    for (let i = 0; i < 4; i++) setCrease(creased, ring[i], ring[(i + 1) % 4], true);
+    const sharp = subdivide(toPolyMesh(creased), 2);
+
+    const top = (mesh: { positions: number[] }) => Math.max(...mesh.positions.filter((_, i) => i % 3 === 2));
+    // Smoothed alone, the top face sags away from the cage; creased all round,
+    // it stays exactly where it was drawn.
+    expect(top(plain)).toBeLessThan(0.01);
+    expect(top(sharp)).toBeCloseTo(0.01, 9);
+  });
+
+  it('keeps creases sharp through every level', () => {
+    const l = unitCube(0.01);
+    const ring = topRing(l);
+    for (let i = 0; i < 4; i++) setCrease(l, ring[i], ring[(i + 1) % 4], true);
+    const once = subdivide(toPolyMesh(l), 1);
+    // Four creased edges become eight, and they are still marked.
+    expect(once.creases?.size).toBe(8);
+    expect(subdivide(toPolyMesh(l), 2).creases?.size).toBe(16);
+  });
+
+  it('forgets a crease when its edge stops existing', () => {
+    const l = unitCube();
+    const ring = topRing(l);
+    setCrease(l, ring[0], ring[1], true);
+    expect(latticeStats(l).creases).toBe(1);
+    // Both faces along that edge gone means the edge is gone.
+    removeFace(l, 1);
+    removeFace(l, 2);
+    expect(latticeStats(l).creases).toBe(0);
+  });
+
+  it('follows a welded corner rather than dangling', () => {
+    const l = unitCube();
+    const ring = topRing(l);
+    setCrease(l, ring[0], ring[1], true);
+    moveVertex(l, ring[0], 0, 1, 1); // weld the first corner onto the fourth
+    expect(isCrease(l, ring[3], ring[1])).toBe(true);
+  });
+
+  it('survives being saved and reopened', () => {
+    const l = unitCube(0.02);
+    const ring = topRing(l);
+    setCrease(l, ring[0], ring[1], true);
+    setCrease(l, ring[1], ring[2], true);
+    const back = deserializeCage(serializeCage(l));
+    expect(latticeStats(back).creases).toBe(2);
+    expect(toSceneGeom(back, 2).renderVertices).toEqual(toSceneGeom(l, 2).renderVertices);
+  });
+
+  it('reads a cage saved before creases existed', () => {
+    const cage = serializeCage(unitCube());
+    delete (cage as { creases?: number[] }).creases;
+    expect(latticeStats(deserializeCage(cage)).creases).toBe(0);
+  });
+
+  it('comes back on the snapshot an undo restores', () => {
+    const l = unitCube();
+    const ring = topRing(l);
+    setCrease(l, ring[0], ring[1], true);
+    const snapshot = cloneLattice(l);
+    setCrease(l, ring[0], ring[1], false);
+    expect(latticeStats(l).creases).toBe(0);
+    restoreLattice(l, snapshot);
+    expect(latticeStats(l).creases).toBe(1);
   });
 });
