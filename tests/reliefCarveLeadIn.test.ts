@@ -86,14 +86,24 @@ describe('entering the cut after a roughing pass', () => {
     const r = generateReliefCarveGcode(dome, BASE);
     expect(r.success).toBe(true);
 
-    // Everything the program is known to cut, as a point cloud. A rapid that
-    // passes over any of these lower than the point itself is a collision.
-    const solid = r.segments.flatMap((s) => s.points);
+    /*
+     * The finishing pass only, for a reason worth stating.
+     *
+     * It cuts each point once, to its final height, so its own toolpath is a
+     * faithful model of what is standing while it runs — a rapid lower than any
+     * of those points is a collision, full stop. Roughing cuts the same ground
+     * repeatedly at descending depths, so the same test there would flag a ring
+     * flying over the shallower bite it has itself already removed. Roughing's
+     * traverses are safe by construction instead: they clear the top of the
+     * layer being cut, and nothing in a layer's region stands above that.
+     */
+    const finishing = r.gcode.slice(r.gcode.indexOf('T2 M6'));
+    const solid = r.segments.filter((s) => s.type === 'finishing').flatMap((s) => s.points);
     expect(solid.length).toBeGreaterThan(100);
 
     let x = 0, y = 0, z = BASE.safeZ;
     let rapids = 0;
-    for (const line of r.gcode.split('\n')) {
+    for (const line of finishing.split('\n')) {
       const mx = /X(-?[\d.]+)/.exec(line);
       const my = /Y(-?[\d.]+)/.exec(line);
       const mz = /Z(-?[\d.]+)/.exec(line);
@@ -129,6 +139,36 @@ describe('entering the cut after a roughing pass', () => {
     const deepest = Math.min(...cutZs(r.gcode));
     // Shortening the ramp must not shorten the cut: the floor is still cut.
     expect(deepest).toBeLessThan(-9.5);
+  });
+
+  /*
+   * The layer stepdown is boosted well past the baseline — a 3.4x gain at a 20%
+   * stepover — and that boost is bought entirely by the small radial bite. The
+   * first ring of each layer has no small radial bite: it is a full-width slot.
+   * It was taking the whole boosted depth anyway, which made it the heaviest
+   * cut in the program by a distance.
+   */
+  it('does not slot the first ring at the depth a light radial bite earned', () => {
+    const r = generateReliefCarveGcode(dome, { ...BASE, roughingStrategy: 'adaptive' });
+    expect(r.success).toBe(true);
+
+    // Depths at which roughing walks a ring, before the tool change. A ring's
+    // own moves carry no Z — it is set on the way in and held — so these are
+    // the cutting depths proper, with the lead-in ramps left out.
+    const roughing = r.gcode.slice(0, r.gcode.indexOf('T2 M6'));
+    const depths = new Set<number>();
+    let z = 0;
+    for (const line of roughing.split('\n')) {
+      if (!line.startsWith('G0') && !line.startsWith('G1')) continue;
+      const mz = /Z(-?[\d.]+)/.exec(line);
+      if (mz) z = parseFloat(mz[1]);
+      else if (line.startsWith('G1') && /[XY]/.test(line)) depths.add(z);
+    }
+
+    // The slotting ring is now taken in several bites, so it cuts at depths
+    // between the layers rather than only at the layer floors. With every ring
+    // slotting the full layer there were exactly as many depths as layers.
+    expect(depths.size).toBeGreaterThan(r.roughingPassCount);
   });
 
   it('ramps from the stock face when there is no roughing pass to have cleared it', () => {

@@ -1907,6 +1907,33 @@ export function generateReliefCarveGcode(
         // chip it is actually taking rather than the one the stepover implies.
         const feed = feedForEngagement(opts.roughingFeedrate, ring.engagement);
 
+        /*
+         * ...and cut at the depth its own engagement earns, not the layer's.
+         *
+         * The layer stepdown is boosted well past the baseline — with a 6.35 mm
+         * cutter at a 20% stepover, `(0.45/0.2)^1.5` is a 3.4x gain — and that
+         * boost is bought entirely by the small radial bite. The first ring
+         * does not have a small radial bite. It is a full-width slot, so it was
+         * taking the whole boosted depth at 100% engagement: a 6.35 mm wide,
+         * 4.75 mm deep slot entered on a straight ramp, which is the single
+         * heaviest cut in the program and what the carve sounded like when it
+         * was being aggressive. Only a 1/1.6 feed floor stood against it.
+         *
+         * Asking the same function what depth this ring's engagement is worth
+         * gives the baseline back, since the boost is a function of engagement
+         * and there is none to be had at full width. The ring is then taken in
+         * as many equal bites as that allows, and the rings behind it — which
+         * really are at the stepover the boost was calculated for — are
+         * untouched and still take the layer in one pass.
+         */
+        const ringStep = stepdownForEngagement(
+          opts.roughingToolDiaMm,
+          ring.engagement,
+          baseStepdown
+        );
+        const bites = Math.max(1, Math.ceil((layerStep - 1e-6) / ringStep));
+        const layerTop = Math.min(0, layerZ + layerStep);
+
         for (const loop of ring.loops) {
           if (loop.length < 2) continue;
 
@@ -1918,28 +1945,34 @@ export function generateReliefCarveGcode(
           // raster is thinned, and far more pressing here, since a roughing
           // ring is mostly long gentle curves that a handful of points describe
           // to well inside the machine's own resolution.
-          const path = simplifyPass(
+          const plan = simplifyPass(
             loop.map((p) => ({ x: safeX(p.x), y: safeY(p.y), z: layerZ })),
             ROUGH_SIMPLIFY_MM
           );
-          if (path.length < 2) continue;
+          if (plan.length < 2) continue;
 
-          // Ramp in along the ring rather than plunging: the centre of an end
-          // mill cuts at zero surface speed, and a deep layer pulls hard on it.
-          leadIn(path, Math.min(0, layerZ + layerStep), opts.roughingPlungeRate, feed);
+          for (let bite = 1; bite <= bites; bite++) {
+            const z = bite === bites ? layerZ : layerTop - (layerStep * bite) / bites;
+            const above = layerTop - (layerStep * (bite - 1)) / bites;
+            const path = plan.map((p) => ({ ...p, z }));
 
-          for (let i = 1; i < path.length; i++) {
-            cutTo(path[i].x, path[i].y, layerZ);
-            gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)} F${Math.round(feed)}`);
+            // Ramp in along the ring rather than plunging: the centre of an end
+            // mill cuts at zero surface speed, and a deep layer pulls hard on it.
+            leadIn(path, above, opts.roughingPlungeRate, feed);
+
+            for (let i = 1; i < path.length; i++) {
+              cutTo(path[i].x, path[i].y, z);
+              gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)} F${Math.round(feed)}`);
+            }
+            // Closed: back to where it started, so the ring leaves nothing behind.
+            cutTo(path[0].x, path[0].y, z);
+            gcode.push(`G1 X${f(path[0].x)} Y${f(path[0].y)} F${Math.round(feed)}`);
+
+            // No retract here: the next `leadIn` lifts only as far as it needs
+            // to clear what stands between this ring and the one inside it, and
+            // the final retract at the end of the program covers the last one.
+            segments.push({ type: 'roughing', points: path, traverseZ: lastTraverseZ });
           }
-          // Closed: back to where it started, so the ring leaves nothing behind.
-          cutTo(path[0].x, path[0].y, layerZ);
-          gcode.push(`G1 X${f(path[0].x)} Y${f(path[0].y)} F${Math.round(feed)}`);
-
-          // No retract here: the next `leadIn` lifts only as far as it needs
-          // to clear what stands between this ring and the one inside it, and
-          // the final retract at the end of the program covers the last one.
-          segments.push({ type: 'roughing', points: path, traverseZ: lastTraverseZ });
         }
       }
     };
