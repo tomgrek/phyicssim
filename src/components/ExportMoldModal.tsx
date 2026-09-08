@@ -209,6 +209,12 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    // `setSize(w, h, false)` below sets only the drawing buffer, so the canvas
+    // needs its own CSS size or it lays out at `w * devicePixelRatio` and is
+    // clipped from the top-left. See the same fix in ExportReliefCarveModal.
+    renderer.domElement.style.display = 'block';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
     mount.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);

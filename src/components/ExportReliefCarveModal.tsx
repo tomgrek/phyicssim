@@ -547,6 +547,22 @@ function ToolpathView({
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    /*
+     * The canvas needs a CSS size of its own, not just a backing-store size.
+     *
+     * `setSize(w, h, false)` below sets `canvas.width/height` — the drawing
+     * buffer, which is `w * devicePixelRatio` — and deliberately leaves
+     * `style.width/height` alone. Nothing else here sizes it, and a canvas with
+     * no CSS size lays out at its intrinsic pixel size, so on a HiDPI screen it
+     * rendered at twice its container, anchored top-left inside an
+     * `overflow-hidden` parent. What you saw was the upper-left quadrant of a
+     * correctly centred render: the toolpath looked zoomed in and shoved off
+     * centre, and the cutter marker that follows a running job was usually off
+     * the visible frame entirely.
+     */
+    renderer.domElement.style.display = 'block';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
     mount.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
