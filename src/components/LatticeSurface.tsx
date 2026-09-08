@@ -35,7 +35,7 @@ import { useStore } from '../store/useStore';
 import {
   deserializeCage, serializeCage, cloneLattice, restoreLattice,
   toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace,
-  removeFace, removeVertex, moveVertex, flipFace, setCrease, isCrease, creaseEdges, edgeKey, extrudeFace, mirrorFace, findMirrorFace,
+  removeFace, removeVertex, moveVertex, flipFace, setCrease, isCrease, creaseEdges, edgeKey, edgeLoop, extrudeFace, mirrorFace, findMirrorFace,
   faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord,
   AXIS_INDEX, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
 } from '../utils/latticeMesh';
@@ -62,6 +62,7 @@ export interface LatticeSurfaceProps {
   data: any;
   cage: LatticeCage;
   subdiv: number;
+  thickness: number;
 }
 
 const OTHER_AXES: Record<Axis, [0 | 1 | 2, 0 | 1 | 2]> = {
@@ -88,7 +89,7 @@ function makeDotTexture(): THREE.Texture {
 }
 
 export function LatticeSurface({
-  nodeId, geomName, color, mujoco, model, data, cage, subdiv,
+  nodeId, geomName, color, mujoco, model, data, cage, subdiv, thickness,
 }: LatticeSurfaceProps) {
   const groupRef = useRef<THREE.Group>(null);
   /** The group everything in raw lattice coordinates hangs off. See `solid`. */
@@ -148,7 +149,15 @@ export function LatticeSurface({
   const hoverVertex = hover ? findVertex(lattice, hover[0], hover[1], hover[2]) : -1;
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
   const [selectedVertex, setSelectedVertex] = useState<number | null>(null);
-  const [selectedEdge, setSelectedEdge] = useState<[number, number] | null>(null);
+  /**
+   * The selected edges — usually one, or a whole loop once L has been pressed.
+   *
+   * A list rather than a single edge because the edges worth marking sharp come
+   * in rings: the rim of a shell, the top of a cylinder. Creasing one of those
+   * an edge at a time is a dozen clicks that all have to be right, and a single
+   * missed edge in a hard rim shows up only after smoothing, as a dent.
+   */
+  const [selectedEdges, setSelectedEdges] = useState<[number, number][]>([]);
 
   /** What a drag is in the middle of doing, and what to rewind to per step. */
   const drag = useRef<
@@ -230,14 +239,14 @@ export function LatticeSurface({
    * body origin.
    */
   const solid = useMemo(() => {
-    const { renderVertices, faces, origin } = toSceneGeom(lattice, subdiv);
+    const { renderVertices, faces, origin } = toSceneGeom(lattice, subdiv, thickness);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(renderVertices, 3));
     geometry.setIndex(faces);
     geometry.computeVertexNormals();
     return { geometry, origin };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lattice, revision, subdiv]);
+  }, [lattice, revision, subdiv, thickness]);
 
   /**
    * An invisible copy of the CAGE, for picking faces.
@@ -294,14 +303,14 @@ export function LatticeSurface({
   }, [lattice, revision, position]);
 
   const edgeHighlight = useMemo(() => {
-    if (!selectedEdge) return null;
+    if (selectedEdges.length === 0) return null;
     const values: number[] = [];
-    for (const v of selectedEdge) values.push(...position(v));
+    for (const [a, b] of selectedEdges) values.push(...position(a), ...position(b));
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(values, 3));
     return geometry;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [position, revision, selectedEdge]);
+  }, [position, revision, selectedEdges]);
 
   /** The cage's own vertices, as draggable handles. */
   const handles = useMemo(() => {
@@ -722,7 +731,7 @@ export function LatticeSurface({
       // Off the model entirely: an edge seen against the background is still an
       // edge, and clicking empty space clears the selection.
       const edge = ray && pickEdge(ray);
-      setSelectedEdge(edge);
+      setSelectedEdges(edge ? [edge] : []);
       if (edge) {
         setSelectedFace(null);
         setSelectedVertex(null);
@@ -756,7 +765,7 @@ export function LatticeSurface({
       const ray = localRay(event);
       const edge = ray && pickEdge(ray);
       if (edge) {
-        setSelectedEdge(edge);
+        setSelectedEdges([edge]);
         setSelectedFace(null);
         setSelectedVertex(null);
         return;
@@ -765,7 +774,7 @@ export function LatticeSurface({
 
     setSelectedFace(face);
     setSelectedVertex(null);
-    setSelectedEdge(null);
+    setSelectedEdges([]);
     if (tool === 'extrude') beginExtrude(face, event);
   }, [beginExtrude, localRay, pick.triangleFace, pickEdge, tool]);
 
@@ -776,7 +785,7 @@ export function LatticeSurface({
     event.stopPropagation();
     setSelectedVertex(vertex);
     setSelectedFace(null);
-    setSelectedEdge(null);
+    setSelectedEdges([]);
     beginVertexDrag(vertex, event);
   }, [beginVertexDrag, handles, tool]);
 
@@ -812,7 +821,7 @@ export function LatticeSurface({
         setPending([]);
         setSelectedFace(null);
         setSelectedVertex(null);
-        setSelectedEdge(null);
+        setSelectedEdges([]);
         return;
       }
       if (key === 'enter') {
@@ -858,14 +867,26 @@ export function LatticeSurface({
         setSelectedVertex(null);
         return;
       }
-      if (key === 's' && selectedEdge) {
+      if (key === 'l' && selectedEdges.length > 0) {
+        // Grow the selection to the whole ring the edge belongs to. Pressed on a
+        // loop that has nowhere further to go, it simply stays put.
+        const [a, b] = selectedEdges[0];
+        const loop = edgeLoop(lattice, a, b);
+        if (loop.length > 0) setSelectedEdges(loop);
+        return;
+      }
+
+      if (key === 's' && selectedEdges.length > 0) {
         // Sharpen. The one control that makes smoothing usable for a part
         // rather than a pebble: everything rounds except what is marked.
-        const [a, b] = selectedEdge;
-        const sharp = !isCrease(lattice, a, b);
+        // Softening only when the WHOLE selection is already sharp, so pressing
+        // S on a loop that is half marked finishes the job rather than
+        // inverting it edge by edge into a different half.
+        const sharp = !selectedEdges.every(([a, b]) => isCrease(lattice, a, b));
         mutate(() => {
-          setCrease(lattice, a, b, sharp);
-          if (mirror) {
+          for (const [a, b] of selectedEdges) {
+            setCrease(lattice, a, b, sharp);
+            if (!mirror) continue;
             const reflect = (v: number) => {
               const [i, j, k] = mirrorCoord(coordOf(lattice, v), mirror);
               return findVertex(lattice, i, j, k);
@@ -892,7 +913,7 @@ export function LatticeSurface({
     // open and own the shape.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdge, selectedFace, selectedVertex, snap]);
+  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdges, selectedFace, selectedVertex, snap]);
 
   // A drag left open by an unmount would leave the camera disabled.
   useEffect(() => () => {

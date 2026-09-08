@@ -24,7 +24,7 @@
 
 import {
   addFace, coordOf, edgeKey, extrudeFace, faceNormal, findFace, findMirrorFace, findVertex,
-  isCrease, isWatertight, latticeBounds, latticeStats, mirrorCoord, mirrorFace,
+  edgeLoop, isCrease, isWatertight, latticeBounds, latticeStats, mirrorCoord, mirrorFace,
   removeFace, setCrease, vertexAt, dominantAxis,
   type Axis, type Lattice, type LatticeCoord,
 } from './latticeMesh';
@@ -195,12 +195,18 @@ export function extrudeMm(
  * Each edge is a PAIR of corners in millimetres. Without this, smoothing is all
  * or nothing — a cage is either a faceted box or a pebble, and almost nothing
  * worth making is either.
+ *
+ * `loop` grows each edge to the whole ring it belongs to, which is what a rim
+ * usually is. Naming a dozen edges by their coordinates is a dozen chances to
+ * get one wrong, and a single soft edge in a hard rim only shows itself after
+ * the shape is smoothed, as a dent.
  */
 export function sharpenEdgesMm(
   lattice: Lattice,
   edges: unknown,
   sharp: boolean,
   mirror?: Axis,
+  loop = false,
 ): { changed: number; skipped: FaceReport[] } {
   if (!Array.isArray(edges) || edges.length === 0) {
     throw new Error('edges must be a list of edges, each a pair of corners [[x, y, z], [x, y, z]] in millimetres');
@@ -221,15 +227,22 @@ export function sharpenEdgesMm(
       skipped.push({ face: edge, reason: 'no corner of the shape is at one of those points' });
       continue;
     }
-    if (setCrease(lattice, verts[0], verts[1], sharp)) changed++;
-    else skipped.push({ face: edge, reason: sharp ? 'no face runs along that edge, or it is sharp already' : 'that edge was not sharp' });
+    const targets = loop ? edgeLoop(lattice, verts[0], verts[1]) : [[verts[0], verts[1]] as [number, number]];
+    let touched = 0;
+    for (const [p, q] of targets) if (setCrease(lattice, p, q, sharp)) touched++;
+    changed += touched;
+    if (touched === 0) {
+      skipped.push({ face: edge, reason: sharp ? 'no face runs along that edge, or it is sharp already' : 'that edge was not sharp' });
+    }
 
     if (mirror) {
-      const reflected = verts.map((v) => {
-        const [i, j, k] = mirrorCoord(coordOf(lattice, v), mirror);
-        return findVertex(lattice, i, j, k);
-      });
-      if (!reflected.some((v) => v === -1)) setCrease(lattice, reflected[0], reflected[1], sharp);
+      for (const [p, q] of targets) {
+        const reflected = [p, q].map((v) => {
+          const [i, j, k] = mirrorCoord(coordOf(lattice, v), mirror);
+          return findVertex(lattice, i, j, k);
+        });
+        if (!reflected.some((v) => v === -1)) setCrease(lattice, reflected[0], reflected[1], sharp);
+      }
     }
   }
 

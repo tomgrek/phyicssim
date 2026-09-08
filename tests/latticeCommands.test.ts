@@ -160,3 +160,35 @@ describe('creasing over MCP', () => {
     expect(latticeSummary(l).creases).toBe(2);
   });
 });
+
+describe('creasing a whole loop over MCP', () => {
+  /** A 20 mm plate extruded twice, so its middle ring is a real loop. */
+  function tube() {
+    const l = createLattice(DEFAULT_UNIT);
+    const plate = [[-10, -10, 0], [10, -10, 0], [10, 10, 0], [-10, 10, 0]];
+    addFacesMm(l, [plate]);
+    const first = extrudeMm(l, plate, 10);
+    extrudeMm(l, first.cap, 10);
+    return l;
+  }
+
+  it('grows one edge into the ring it belongs to', () => {
+    const l = tube();
+    const oneEdge = [[-10, -10, 10], [10, -10, 10]];
+    expect(sharpenEdgesMm(l, [oneEdge], true, undefined, true).changed).toBe(4);
+    expect(latticeSummary(l).creases).toBe(4);
+  });
+
+  it('creases only the edge given without it', () => {
+    const l = tube();
+    expect(sharpenEdgesMm(l, [[[-10, -10, 10], [10, -10, 10]]], true).changed).toBe(1);
+  });
+
+  it('takes a whole loop off again', () => {
+    const l = tube();
+    const oneEdge = [[-10, -10, 10], [10, -10, 10]];
+    sharpenEdgesMm(l, [oneEdge], true, undefined, true);
+    expect(sharpenEdgesMm(l, [oneEdge], false, undefined, true).changed).toBe(4);
+    expect(latticeSummary(l).creases).toBe(0);
+  });
+});

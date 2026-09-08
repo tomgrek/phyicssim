@@ -1147,6 +1147,7 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
             data={data}
             cage={latticeNode.latticeCage}
             subdiv={latticeNode.latticeSubdiv ?? 0}
+            thickness={latticeNode.latticeThickness ?? 0}
           />
         )}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />

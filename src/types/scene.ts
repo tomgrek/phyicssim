@@ -181,6 +181,13 @@ export interface SceneNode {
   /** How many Catmull-Clark passes the mesh geom was built with (0, 1 or 2). */
   latticeSubdiv?: number;
   /**
+   * Wall thickness in metres, or 0 for none. A lattice is drawn as a surface,
+   * and a surface has no inside for a slicer or a CAM job to fill; this is what
+   * turns one into a shell. Applied when the mesh is built, never to the cage,
+   * so it can be changed or taken off without the shape remembering it.
+   */
+  latticeThickness?: number;
+  /**
    * How far the mesh geom was shifted to put its centre of mass on the body
    * origin, in the body's own axes. Bodies rotate about their origin and MuJoCo
    * moves a mesh asset onto its own centre of mass, so a shape built off to one

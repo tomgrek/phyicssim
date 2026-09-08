@@ -30,6 +30,7 @@
 // ---------------------------------------------------------------------------
 
 import { subdivide, type PolyMesh } from './subdivide';
+import { solidify } from './solidify';
 
 /** Where a lattice vertex is, in whole grid steps from the body origin. */
 export type LatticeCoord = [number, number, number];
@@ -410,6 +411,101 @@ export function creaseEdges(lattice: Lattice): number[] {
   return out;
 }
 
+/** The corners joined to this one by some face's edge. */
+export function neighbours(lattice: Lattice, vertex: number): number[] {
+  const found = new Set<number>();
+  for (const f of lattice.vertexFaces.get(vertex) ?? []) {
+    const verts = lattice.faces[f];
+    if (!verts) continue;
+    for (let i = 0; i < verts.length; i++) {
+      if (verts[i] !== vertex) continue;
+      found.add(verts[(i + 1) % verts.length]);
+      found.add(verts[(i - 1 + verts.length) % verts.length]);
+    }
+  }
+  return [...found];
+}
+
+/** The faces running along an edge — two on a closed surface, one on a border. */
+export function facesAlong(lattice: Lattice, a: number, b: number): number[] {
+  const found: number[] = [];
+  for (const f of lattice.vertexFaces.get(a) ?? []) {
+    const verts = lattice.faces[f];
+    if (!verts) continue;
+    for (let i = 0; i < verts.length; i++) {
+      const p = verts[i];
+      const q = verts[(i + 1) % verts.length];
+      if ((p === a && q === b) || (p === b && q === a)) {
+        found.push(f);
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Where an edge loop carries on, arriving at `vertex` along the edge from
+ * `from`, or -1 where it stops.
+ *
+ * On a border it follows the border, which is the loop somebody means when they
+ * point at the rim of an open shell. Inside the surface it takes the edge on
+ * the far side of a four-way corner — the one sharing no face with the edge it
+ * came in on — which is what makes a loop run straight on rather than turning
+ * into whichever face happens to be next. Anywhere else, at a corner of three
+ * or five edges, there is no "straight on" and the loop honestly ends.
+ */
+function continueLoop(lattice: Lattice, vertex: number, from: number): number {
+  const around = neighbours(lattice, vertex);
+  const arrivedOnBorder = facesAlong(lattice, from, vertex).length === 1;
+
+  if (arrivedOnBorder) {
+    const onward = around.filter((w) => w !== from && facesAlong(lattice, vertex, w).length === 1);
+    return onward.length === 1 ? onward[0] : -1;
+  }
+
+  if (around.length !== 4) return -1;
+  const arrivedFaces = new Set(facesAlong(lattice, from, vertex));
+  const onward = around.filter((w) => w !== from && facesAlong(lattice, vertex, w).every((f) => !arrivedFaces.has(f)));
+  return onward.length === 1 ? onward[0] : -1;
+}
+
+/**
+ * The whole loop an edge belongs to.
+ *
+ * The reason to have it is that the interesting edges come in rings: the rim of
+ * a shell, the top of a cylinder, the seam around a boss. Creasing one of those
+ * an edge at a time is a dozen clicks that have to be got exactly right, and
+ * missing one leaves a single soft edge in a hard rim — which shows up only
+ * once the shape is smoothed, and looks like a dent.
+ *
+ * Always includes the edge given, and never repeats one, so a closed loop comes
+ * back once round rather than for ever.
+ */
+export function edgeLoop(lattice: Lattice, a: number, b: number): [number, number][] {
+  if (!edgeExists(lattice, a, b)) return [];
+  const seen = new Set<string>([edgeKey(a, b)]);
+  const loop: [number, number][] = [[a, b]];
+
+  const walk = (from: number, to: number, append: boolean) => {
+    let previous = from;
+    let current = to;
+    for (;;) {
+      const next = continueLoop(lattice, current, previous);
+      if (next === -1 || seen.has(edgeKey(current, next))) return;
+      seen.add(edgeKey(current, next));
+      if (append) loop.push([current, next]);
+      else loop.unshift([next, current]);
+      previous = current;
+      current = next;
+    }
+  };
+
+  walk(a, b, true);
+  walk(b, a, false);
+  return loop;
+}
+
 /** Drops creases whose edge no longer exists, after faces have been removed. */
 function pruneCreases(lattice: Lattice) {
   for (const key of [...lattice.creases]) {
@@ -750,6 +846,11 @@ export function meshCentroid(poly: PolyMesh): [number, number, number] {
  * drawn separately as an overlay, and is preserved on the node so it can be
  * edited again (see `serializeCage`); it cannot be recovered from this.
  *
+ * `thickness` turns an open surface into a shell of that wall thickness, in
+ * metres, and is applied AFTER smoothing so the wall follows the rounded
+ * surface rather than the blocky cage that produced it. A closed shape ignores
+ * it — see utils/solidify.ts.
+ *
  * The centring is not cosmetic. A body's frame is where it spins and where
  * MuJoCo expects the mesh's mass to be, so a shape built off to one side of the
  * origin — which is exactly what happens when somebody extrudes away from where
@@ -760,8 +861,10 @@ export function meshCentroid(poly: PolyMesh): [number, number, number] {
 export function toSceneGeom(
   lattice: Lattice,
   subdivLevel = 0,
+  thickness = 0,
 ): { vertices: number[]; renderVertices: number[]; faces: number[]; origin: [number, number, number] } {
-  const poly = subdivLevel > 0 ? subdivide(toPolyMesh(lattice), subdivLevel) : toPolyMesh(lattice);
+  const smoothed = subdivLevel > 0 ? subdivide(toPolyMesh(lattice), subdivLevel) : toPolyMesh(lattice);
+  const poly = thickness > 0 ? solidify(smoothed, thickness) : smoothed;
   const origin = meshCentroid(poly);
 
   const count = poly.positions.length / 3;

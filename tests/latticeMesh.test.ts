@@ -4,7 +4,8 @@ import {
   moveVertex, removeVertex, faceNormal, dominantAxis, extrudeFace, mirrorFace,
   isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges, coordOf,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
-  boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, type Lattice,
+  boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, edgeLoop,
+  facesAlong, edgeExists, type Lattice,
 } from '../src/utils/latticeMesh';
 import { meshCentroid } from '../src/utils/latticeMesh';
 import { subdivide } from '../src/utils/subdivide';
@@ -470,5 +471,74 @@ describe('creases', () => {
     expect(latticeStats(l).creases).toBe(0);
     restoreLattice(l, snapshot);
     expect(latticeStats(l).creases).toBe(1);
+  });
+});
+
+describe('edge loops', () => {
+  /** A quad extruded twice: a tube whose middle ring is four-way all round. */
+  function tube(): Lattice {
+    const l = createLattice(0.01);
+    const a = vertexAt(l, 0, 0, 0), b = vertexAt(l, 1, 0, 0);
+    const c = vertexAt(l, 1, 1, 0), d = vertexAt(l, 0, 1, 0);
+    const face = addFace(l, [a, b, c, d]);
+    const first = extrudeFace(l, face, 1)!;
+    extrudeFace(l, first.cap, 1);
+    return l;
+  }
+
+  it('runs a ring right round the middle of a tube', () => {
+    const l = tube();
+    const loop = edgeLoop(l, findVertex(l, 0, 0, 1), findVertex(l, 1, 0, 1));
+    expect(loop).toHaveLength(4);
+    const keys = new Set(loop.map(([p, q]) => (p < q ? `${p}:${q}` : `${q}:${p}`)));
+    expect(keys.size).toBe(4);
+    for (const [p, q] of loop) expect(edgeExists(l, p, q)).toBe(true);
+  });
+
+  it('runs a side edge along the tube instead of round it', () => {
+    const l = tube();
+    const loop = edgeLoop(l, findVertex(l, 0, 0, 0), findVertex(l, 0, 0, 1));
+    // Two steps up the tube, stopping at the three-way corners on both caps.
+    expect(loop).toHaveLength(2);
+  });
+
+  it('finds nothing to follow on a box, where every corner is three-way', () => {
+    // Not a shortcoming: a box has no straight-on at any corner, and picking one
+    // of the two turns arbitrarily is how a "loop" ends up somewhere nobody
+    // pointed at.
+    const l = unitCube();
+    expect(edgeLoop(l, findVertex(l, 0, 0, 0), findVertex(l, 1, 0, 0))).toHaveLength(1);
+  });
+
+  it('follows the border of an open surface', () => {
+    // A 2x2 patch: its border is eight edges, its inner edges are not a border.
+    const l = createLattice(0.01);
+    const v = (i: number, j: number) => vertexAt(l, i, j, 0);
+    for (let i = 0; i < 2; i++) {
+      for (let j = 0; j < 2; j++) addFace(l, [v(i, j), v(i + 1, j), v(i + 1, j + 1), v(i, j + 1)]);
+    }
+    const loop = edgeLoop(l, v(0, 0), v(1, 0));
+    expect(loop).toHaveLength(8);
+    // It is the border, so every edge in it has exactly one face.
+    for (const [p, q] of loop) expect(facesAlong(l, p, q)).toHaveLength(1);
+  });
+
+  it('stops where there is no straight on', () => {
+    // Two quads meeting along an edge: the shared edge's ends are three-way
+    // corners, so the loop is just the edge itself.
+    const l = createLattice(0.01);
+    const a = vertexAt(l, 0, 0, 0), b = vertexAt(l, 1, 0, 0);
+    const c = vertexAt(l, 1, 1, 0), d = vertexAt(l, 0, 1, 0);
+    const e = vertexAt(l, 1, 0, 1), f = vertexAt(l, 0, 0, 1);
+    addFace(l, [a, b, c, d]);
+    addFace(l, [a, f, e, b]);
+    const loop = edgeLoop(l, a, b);
+    expect(loop.length).toBeGreaterThanOrEqual(1);
+    for (const [p, q] of loop) expect(edgeExists(l, p, q)).toBe(true);
+  });
+
+  it('refuses an edge that is not there', () => {
+    const l = unitCube();
+    expect(edgeLoop(l, findVertex(l, 0, 0, 0), findVertex(l, 1, 1, 1))).toEqual([]);
   });
 });

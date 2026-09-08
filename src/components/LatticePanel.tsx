@@ -17,7 +17,7 @@
 import { useEffect } from 'react';
 import {
   PenLine, MousePointer2, MoveVertical, Grid3x3, FlipHorizontal2,
-  Boxes, TriangleAlert, Check, Spline, Scissors,
+  Boxes, TriangleAlert, Check, Spline, Scissors, Layers,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { SceneNode } from '../types/scene';
@@ -33,7 +33,7 @@ interface ToolDefinition {
 
 const TOOLS: ToolDefinition[] = [
   { tool: 'place', label: 'Place', key: '1', icon: PenLine, hint: 'Click grid points to draw a face. Four corners closes it automatically; Enter closes a triangle; Esc abandons it.' },
-  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it; click a face or an edge to select it. S keeps an edge sharp under smoothing, F turns a face inside out.' },
+  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it; click a face or an edge to select it. L grows an edge to its whole loop, S keeps it sharp under smoothing, F turns a face inside out.' },
   { tool: 'extrude', label: 'Extrude', key: '3', icon: MoveVertical, hint: 'Drag a face along its own axis to push it out in whole grid steps — the fastest way to get from a plate to a solid.' },
 ];
 
@@ -64,6 +64,7 @@ export function LatticePanel() {
   const setMirror = useStore((s) => s.setLatticeMirror);
   const setLatticeNodeId = useStore((s) => s.setLatticeNodeId);
   const setLatticeSubdiv = useStore((s) => s.setLatticeSubdiv);
+  const setLatticeThickness = useStore((s) => s.setLatticeThickness);
   const node = useStore((s) => {
     const find = (nodes: SceneNode[]): SceneNode | null => {
       for (const n of nodes) {
@@ -98,6 +99,7 @@ export function LatticePanel() {
 
   const unitMm = (node?.latticeCage?.unit ?? 0.005) * 1000;
   const subdiv = node?.latticeSubdiv ?? 0;
+  const thicknessMm = Math.round((node?.latticeThickness ?? 0) * 1000 * 10) / 10;
 
   return (
     <div className={panelClass}>
@@ -251,6 +253,41 @@ export function LatticePanel() {
         </div>
       </div>
 
+      {/* Wall thickness. A lattice is a surface, and a surface has no inside
+          for a slicer or a CAM job to fill — this is what turns the skin you
+          drew into a part with a wall. Only offered while the shape is open,
+          because thickening a closed solid is a different question (hollowing
+          it, and where does the material get out?). */}
+      {stats && !stats.watertight && (
+        <div className="space-y-1.5">
+          <div className="flex items-baseline justify-between">
+            <span className={`${labelClass} flex items-center gap-1`}><Layers className="w-3 h-3" />Wall</span>
+            <span className="text-[10px] font-mono text-slate-600 dark:text-slate-300">
+              {thicknessMm === 0 ? 'none' : `${thicknessMm} mm`}
+            </span>
+          </div>
+          <div className="flex gap-1">
+            {[0, 1, 2, 3].map((mm) => (
+              <button
+                key={mm}
+                type="button"
+                onClick={() => latticeNodeId && setLatticeThickness(latticeNodeId, mm)}
+                title={mm === 0
+                  ? 'Leave it a surface. Fine to model with, and refused by anything that has to make it.'
+                  : `Thicken the surface into a ${mm} mm shell, offset inwards so the shape keeps the dimensions you drew. The rim is held sharp, and the wall follows the smoothed surface rather than the cage.`}
+                className={`flex-1 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                  thicknessMm === mm
+                    ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                {mm === 0 ? 'None' : `${mm}mm`}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {stats && (
         <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-1">
           <div className="flex items-center justify-between text-[10px]">
@@ -272,7 +309,8 @@ export function LatticePanel() {
           )}
           {stats.creases === 0 && subdiv > 0 && (
             <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
-              Smoothing rounds every edge. Select one and press <kbd className="font-mono">S</kbd> to hold it sharp.
+              Smoothing rounds every edge. Select one, <kbd className="font-mono">L</kbd> for its whole loop,
+              <kbd className="font-mono"> S</kbd> to hold it sharp.
             </p>
           )}
           {stats.tris > 0 && subdiv > 0 && (
@@ -295,7 +333,11 @@ export function LatticePanel() {
               title="Some edge is not shared by exactly two faces. The viewport does not care; a slicer or a CAM job will refuse the file."
             >
               <TriangleAlert className="w-3 h-3 mt-px shrink-0" />
-              <span>Surface is not closed — it will not print or machine.</span>
+              <span>
+                {thicknessMm > 0
+                  ? 'Open, but walled — the shell above closes it when the mesh is built.'
+                  : 'Surface is not closed — give it a wall above, or cap it by hand.'}
+              </span>
             </div>
           )}
         </div>

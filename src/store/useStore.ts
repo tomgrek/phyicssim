@@ -611,6 +611,8 @@ export interface PhysicsState {
   applyLattice: (nodeId: string, cage: LatticeCage, subdiv?: number) => void;
   /** Changes how many smoothing passes a lattice body's mesh is built with. */
   setLatticeSubdiv: (nodeId: string, level: number) => void;
+  /** Sets a lattice body's wall thickness in millimetres; 0 leaves it a surface. */
+  setLatticeThickness: (nodeId: string, mm: number) => void;
   updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
   // --- CSG (boolean modifiers) ---
   deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
@@ -1074,7 +1076,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       for (const node of nodes) {
         if (node.id === nodeId) {
           const level = subdiv ?? node.latticeSubdiv ?? 0;
-          const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(deserializeCage(cage), level);
+          const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(
+            deserializeCage(cage), level, node.latticeThickness ?? 0,
+          );
           const geom = node.geoms?.find((g: any) => g.type === 'mesh') ?? node.geoms?.[0];
           if (geom) Object.assign(geom, { vertices, renderVertices, faces });
 
@@ -1135,6 +1139,16 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const node = findNode(get().sceneGraph.nodes, nodeId);
     if (!node?.latticeCage) return;
     get().applyLattice(nodeId, node.latticeCage, Math.max(0, Math.min(2, Math.round(level))));
+  },
+
+  setLatticeThickness: (nodeId, mm) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node?.latticeCage) return;
+    // Written to the node first, because applyLattice reads the thickness off
+    // the node when it builds the mesh — the same ordering the version bump
+    // needs, and for the same reason.
+    get().updateNode(nodeId, { latticeThickness: Math.max(0, mm) / 1000 });
+    get().applyLattice(nodeId, node.latticeCage, node.latticeSubdiv ?? 0);
   },
   
   setDraggedNodeId: (id) => {

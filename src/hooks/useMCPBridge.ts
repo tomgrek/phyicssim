@@ -984,10 +984,10 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_SHARPEN': {
-          const { targetId, edges, sharp, mirror } = msg;
+          const { targetId, edges, sharp, mirror, loop } = msg;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
-          const result = sharpenEdgesMm(lattice, edges, sharp !== false, mirror as LatticeAxis | undefined);
+          const result = sharpenEdgesMm(lattice, edges, sharp !== false, mirror as LatticeAxis | undefined, loop === true);
           if (result.changed === 0) {
             return { ok: false, id: targetId, error: 'No edge changed', ...result, ...latticeSummary(lattice) };
           }
@@ -1008,6 +1008,23 @@ export function useMCPBridge() {
             ...latticeSummary(latticeOf(after)),
             // The cage is unchanged; what smoothing changes is the mesh built
             // from it, which is what everything downstream actually sees.
+            meshTriangles: mesh?.faces ? mesh.faces.length / 3 : 0,
+          };
+        }
+
+        case 'LATTICE_WALL': {
+          const { targetId, thicknessMm } = msg;
+          const { node } = latticeTarget(store, targetId);
+          const mm = Math.max(0, Number(thicknessMm) || 0);
+          useStore.getState().setLatticeThickness(node.id, mm);
+          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
+          const mesh = after?.geoms?.find((g: any) => g.type === 'mesh');
+          return {
+            ok: true, id: node.id, thicknessMm: mm,
+            ...latticeSummary(latticeOf(after)),
+            // The CAGE stays open — the wall is built when the mesh is, so the
+            // watertight figure above is about the surface being edited and
+            // this is about the thing that gets exported.
             meshTriangles: mesh?.faces ? mesh.faces.length / 3 : 0,
           };
         }
