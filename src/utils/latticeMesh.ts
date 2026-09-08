@@ -1,0 +1,671 @@
+// ---------------------------------------------------------------------------
+// Lattice modelling
+// ---------------------------------------------------------------------------
+//
+// The third way to make a shape in this app, and the one the other two leave a
+// hole for. Primitives and CSG make what can be described; the sculpt tools in
+// utils/sculptMesh.ts make what can be pushed into being. Neither makes a
+// crisp, dimensioned, hard-surface part — the sort of thing where it matters
+// that two faces are exactly 40 mm apart and that an edge is straight.
+//
+// So this is box modelling: a field of points on a regular grid, and a shape
+// built by connecting them. Two decisions carry the whole file.
+//
+//   * A vertex is a TRIPLE OF INTEGERS, not a position. Snapping is then not a
+//     rounding step that runs on input, it is the only state that exists —
+//     two vertices are the same vertex when their integers match, mirroring is
+//     `i -> -i` with no epsilon, and a coarse grid is the fine grid with a
+//     bigger step rather than a second grid that nearly lines up with it. The
+//     metric position exists only at the moment of emitting a mesh.
+//
+//   * Faces stay QUADS where they were drawn as quads. A quad mesh is what
+//     Catmull-Clark subdivision wants (see utils/subdivide.ts); triangulating
+//     on the way in would throw away the structure that makes a coarse cage
+//     turn into a smooth surface, and put a pole at every vertex.
+//
+// Coordinates are Z-up metres once multiplied by `unit`, matching
+// `SculptMesh` and utils/stlParser.ts; `toSceneGeom` emits the Y-up copy the
+// renderer wants alongside them, so nothing downstream has to know a mesh was
+// built this way.
+// ---------------------------------------------------------------------------
+
+import { subdivide, type PolyMesh } from './subdivide';
+
+/** Where a lattice vertex is, in whole grid steps from the body origin. */
+export type LatticeCoord = [number, number, number];
+
+export interface Lattice {
+  /**
+   * Metres per grid step — the FINEST step. Coarser snapping is a multiple of
+   * this (see `SNAP_MULTIPLES`) rather than a unit of its own, which is what
+   * keeps a coarsely placed vertex exactly on top of a finely placed one
+   * instead of a micron away from it.
+   */
+  unit: number;
+  /** Three integers per vertex. Length is `vertexCount * 3`. */
+  coords: number[];
+  /** "i,j,k" -> vertex index, so placing on an occupied node reuses it. */
+  index: Map<string, number>;
+  /**
+   * Vertex indices per face, 3 or 4 of them, wound counter-clockwise seen from
+   * outside. A hole is a tombstone rather than a splice: face indices are
+   * referred to by the selection, the adjacency and the undo history, and
+   * renumbering them behind those is how a selection ends up pointing at
+   * somebody else's face.
+   */
+  faces: (number[] | null)[];
+  /** vertex index -> the faces using it. Maintained as faces come and go. */
+  vertexFaces: Map<number, Set<number>>;
+  /** Bumped on any change, so caches can tell one cage from another. */
+  revision: number;
+}
+
+/**
+ * The snap steps offered, as multiples of `unit`.
+ *
+ * Powers of two only, and not for tidiness: a 3x step and a 2x step share only
+ * every sixth point, so a face drawn on one and a face drawn on the other meet
+ * along an edge whose endpoints are not shared vertices. That is a crack, and
+ * it survives all the way to the exported STL.
+ */
+export const SNAP_MULTIPLES = [1, 2, 4, 8] as const;
+export type SnapMultiple = (typeof SNAP_MULTIPLES)[number];
+
+/** Default grid step. 5 mm is a coarse enough cage to be worth subdividing. */
+export const DEFAULT_UNIT = 0.005;
+
+export type Axis = 'x' | 'y' | 'z';
+
+export const AXIS_INDEX: Record<Axis, 0 | 1 | 2> = { x: 0, y: 1, z: 2 };
+
+// ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
+
+export function createLattice(unit = DEFAULT_UNIT): Lattice {
+  return {
+    unit,
+    coords: [],
+    index: new Map(),
+    faces: [],
+    vertexFaces: new Map(),
+    revision: 0,
+  };
+}
+
+const key = (i: number, j: number, k: number) => `${i},${j},${k}`;
+
+export function vertexCount(lattice: Lattice): number {
+  return lattice.coords.length / 3;
+}
+
+/** How many faces are actually there, tombstones not counted. */
+export function faceCount(lattice: Lattice): number {
+  let n = 0;
+  for (const face of lattice.faces) if (face) n++;
+  return n;
+}
+
+export function coordOf(lattice: Lattice, vertex: number): LatticeCoord {
+  return [
+    lattice.coords[vertex * 3],
+    lattice.coords[vertex * 3 + 1],
+    lattice.coords[vertex * 3 + 2],
+  ];
+}
+
+/** The vertex at these grid coordinates, or -1 if nothing has been placed. */
+export function findVertex(lattice: Lattice, i: number, j: number, k: number): number {
+  const found = lattice.index.get(key(i, j, k));
+  return found === undefined ? -1 : found;
+}
+
+/** The vertex at these grid coordinates, placing one if there is not one yet. */
+export function vertexAt(lattice: Lattice, i: number, j: number, k: number): number {
+  const existing = lattice.index.get(key(i, j, k));
+  if (existing !== undefined) return existing;
+  const vertex = vertexCount(lattice);
+  lattice.coords.push(i, j, k);
+  lattice.index.set(key(i, j, k), vertex);
+  lattice.revision++;
+  return vertex;
+}
+
+// ---------------------------------------------------------------------------
+// Faces
+// ---------------------------------------------------------------------------
+
+/**
+ * The cycle in a canonical form, so that the same ring of vertices drawn from a
+ * different corner, or in the other direction, is recognised as the same face.
+ *
+ * Direction is included deliberately: a face and its flip are the same ring but
+ * opposite surfaces, and quietly treating a re-draw as a duplicate would take
+ * away the only way to fix a face that came out inside-out.
+ */
+function cycleKey(verts: number[]): string {
+  let start = 0;
+  for (let i = 1; i < verts.length; i++) if (verts[i] < verts[start]) start = i;
+  const rotated: number[] = [];
+  for (let i = 0; i < verts.length; i++) rotated.push(verts[(start + i) % verts.length]);
+  return rotated.join(',');
+}
+
+/** The face using exactly this cycle, or -1. */
+export function findFace(lattice: Lattice, verts: number[]): number {
+  const wanted = cycleKey(verts);
+  for (let f = 0; f < lattice.faces.length; f++) {
+    const face = lattice.faces[f];
+    if (face && face.length === verts.length && cycleKey(face) === wanted) return f;
+  }
+  return -1;
+}
+
+function link(lattice: Lattice, face: number, verts: number[]) {
+  for (const v of verts) {
+    let set = lattice.vertexFaces.get(v);
+    if (!set) {
+      set = new Set();
+      lattice.vertexFaces.set(v, set);
+    }
+    set.add(face);
+  }
+}
+
+function unlink(lattice: Lattice, face: number, verts: number[]) {
+  for (const v of verts) lattice.vertexFaces.get(v)?.delete(face);
+}
+
+/**
+ * Adds a face through these vertices, in order.
+ *
+ * Returns the face index, or -1 if it was refused. A face is refused when it
+ * has fewer than three corners, repeats a corner, or already exists with this
+ * winding — all three are things a click can produce and none of them is worth
+ * an error dialog.
+ */
+export function addFace(lattice: Lattice, verts: number[]): number {
+  if (verts.length < 3) return -1;
+  if (new Set(verts).size !== verts.length) return -1;
+  if (findFace(lattice, verts) !== -1) return -1;
+
+  const face = [...verts];
+  const index = lattice.faces.length;
+  lattice.faces.push(face);
+  link(lattice, index, face);
+  lattice.revision++;
+  return index;
+}
+
+export function removeFace(lattice: Lattice, face: number): boolean {
+  const verts = lattice.faces[face];
+  if (!verts) return false;
+  unlink(lattice, face, verts);
+  lattice.faces[face] = null;
+  lattice.revision++;
+  return true;
+}
+
+/** Turns a face inside out. The fix for one drawn from the wrong side. */
+export function flipFace(lattice: Lattice, face: number): boolean {
+  const verts = lattice.faces[face];
+  if (!verts) return false;
+  verts.reverse();
+  lattice.revision++;
+  return true;
+}
+
+/**
+ * Moves a vertex to different grid coordinates.
+ *
+ * Landing on an occupied node WELDS: the moved vertex is merged into the one
+ * already there and any face that collapsed to fewer than three distinct
+ * corners is dropped. That is what a modeller expects from dragging one corner
+ * onto another, and refusing instead would leave two vertices at one point,
+ * which looks identical and exports as a crack.
+ */
+export function moveVertex(lattice: Lattice, vertex: number, i: number, j: number, k: number): boolean {
+  const [ci, cj, ck] = coordOf(lattice, vertex);
+  if (ci === i && cj === j && ck === k) return false;
+
+  const target = findVertex(lattice, i, j, k);
+  if (target !== -1 && target !== vertex) {
+    mergeVertex(lattice, vertex, target);
+    return true;
+  }
+
+  lattice.index.delete(key(ci, cj, ck));
+  lattice.coords[vertex * 3] = i;
+  lattice.coords[vertex * 3 + 1] = j;
+  lattice.coords[vertex * 3 + 2] = k;
+  lattice.index.set(key(i, j, k), vertex);
+  lattice.revision++;
+  return true;
+}
+
+/** Rewrites every use of `from` as `into`, dropping faces that degenerate. */
+function mergeVertex(lattice: Lattice, from: number, into: number) {
+  const users = [...(lattice.vertexFaces.get(from) ?? [])];
+  for (const f of users) {
+    const verts = lattice.faces[f];
+    if (!verts) continue;
+    unlink(lattice, f, verts);
+    // Collapse runs of the merged vertex: a quad with two corners welded is a
+    // triangle, not a quad with a zero-length edge.
+    const rewritten: number[] = [];
+    for (const v of verts) {
+      const mapped = v === from ? into : v;
+      if (rewritten.length === 0 || rewritten[rewritten.length - 1] !== mapped) rewritten.push(mapped);
+    }
+    while (rewritten.length > 1 && rewritten[0] === rewritten[rewritten.length - 1]) rewritten.pop();
+
+    if (rewritten.length < 3) {
+      lattice.faces[f] = null;
+      continue;
+    }
+    lattice.faces[f] = rewritten;
+    link(lattice, f, rewritten);
+  }
+  lattice.vertexFaces.delete(from);
+
+  const [fi, fj, fk] = coordOf(lattice, from);
+  // The orphan keeps its slot but leaves the index, so nothing finds it again
+  // and no face index has to shift. `toSceneGeom` drops unused vertices anyway.
+  if (lattice.index.get(key(fi, fj, fk)) === from) lattice.index.delete(key(fi, fj, fk));
+  lattice.revision++;
+}
+
+/** Removes a vertex and every face that used it. */
+export function removeVertex(lattice: Lattice, vertex: number): boolean {
+  const users = lattice.vertexFaces.get(vertex);
+  if (!users && findVertex(lattice, ...coordOf(lattice, vertex)) !== vertex) return false;
+  for (const f of [...(users ?? [])]) removeFace(lattice, f);
+  lattice.vertexFaces.delete(vertex);
+  const [i, j, k] = coordOf(lattice, vertex);
+  if (lattice.index.get(key(i, j, k)) === vertex) lattice.index.delete(key(i, j, k));
+  lattice.revision++;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Geometry of a face
+// ---------------------------------------------------------------------------
+
+/**
+ * The face normal in lattice space, by Newell's method.
+ *
+ * Newell rather than a cross product of the first two edges because a face is
+ * allowed to be a polygon and is not guaranteed convex; the first corner of a
+ * concave one gives a normal pointing the wrong way.
+ */
+export function faceNormal(lattice: Lattice, face: number): [number, number, number] | null {
+  const verts = lattice.faces[face];
+  if (!verts) return null;
+  let nx = 0, ny = 0, nz = 0;
+  for (let a = 0; a < verts.length; a++) {
+    const [x1, y1, z1] = coordOf(lattice, verts[a]);
+    const [x2, y2, z2] = coordOf(lattice, verts[(a + 1) % verts.length]);
+    nx += (y1 - y2) * (z1 + z2);
+    ny += (z1 - z2) * (x1 + x2);
+    nz += (x1 - x2) * (y1 + y2);
+  }
+  const length = Math.hypot(nx, ny, nz);
+  if (length === 0) return null;
+  return [nx / length, ny / length, nz / length];
+}
+
+/** The axis a face most nearly faces, and which way along it. */
+export function dominantAxis(normal: [number, number, number]): { axis: Axis; sign: 1 | -1 } {
+  const axes: Axis[] = ['x', 'y', 'z'];
+  let best = 0;
+  for (let a = 1; a < 3; a++) if (Math.abs(normal[a]) > Math.abs(normal[best])) best = a;
+  return { axis: axes[best], sign: normal[best] >= 0 ? 1 : -1 };
+}
+
+/** Where a face's corners average out, in grid steps. Not necessarily integer. */
+export function faceCentre(lattice: Lattice, face: number): [number, number, number] | null {
+  const verts = lattice.faces[face];
+  if (!verts) return null;
+  let x = 0, y = 0, z = 0;
+  for (const v of verts) {
+    const c = coordOf(lattice, v);
+    x += c[0]; y += c[1]; z += c[2];
+  }
+  return [x / verts.length, y / verts.length, z / verts.length];
+}
+
+// ---------------------------------------------------------------------------
+// Extrude
+// ---------------------------------------------------------------------------
+
+/**
+ * Pushes a face out along an axis, walling in the gap it leaves.
+ *
+ * This is the tool that makes the mode worth using: without it every vertex of
+ * every side of a box is placed by hand, and a shape that takes four clicks in
+ * a modeller takes forty here.
+ *
+ * The travel is a whole number of grid steps along an axis rather than along
+ * the face's own normal, because a diagonal normal has no integer multiple that
+ * lands on the grid, and a lattice vertex that is not on the lattice is the one
+ * thing this file exists to prevent. `axis` defaults to whichever the face most
+ * nearly points along.
+ */
+export function extrudeFace(
+  lattice: Lattice,
+  face: number,
+  steps: number,
+  axis?: Axis,
+): { cap: number; sides: number[] } | null {
+  const verts = lattice.faces[face];
+  if (!verts || steps === 0) return null;
+
+  const normal = faceNormal(lattice, face);
+  if (!normal) return null;
+  const dominant = dominantAxis(normal);
+  const along = axis ?? dominant.axis;
+  const a = AXIS_INDEX[along];
+  // Along the face's own axis, "out" is where the normal points; along any
+  // other, the sign the caller gave is the whole instruction.
+  const travel = axis && axis !== dominant.axis ? steps : steps * dominant.sign;
+
+  const moved = verts.map((v) => {
+    const c = coordOf(lattice, v);
+    c[a] += travel;
+    return vertexAt(lattice, c[0], c[1], c[2]);
+  });
+
+  // The old face becomes the inside of the wall and stops being a surface: what
+  // was the outside is now the cap, and leaving both would put a membrane
+  // across the middle of the solid.
+  removeFace(lattice, face);
+
+  const sides: number[] = [];
+  for (let i = 0; i < verts.length; i++) {
+    const next = (i + 1) % verts.length;
+    // Wound so the side quads face outwards given the cap keeps the original
+    // winding: base edge forwards, cap edge backwards.
+    const added = addFace(lattice, [verts[i], verts[next], moved[next], moved[i]]);
+    if (added !== -1) sides.push(added);
+  }
+
+  const cap = addFace(lattice, moved);
+  return { cap, sides };
+}
+
+// ---------------------------------------------------------------------------
+// Mirror
+// ---------------------------------------------------------------------------
+
+/** A coordinate reflected through the body origin on one axis. */
+export function mirrorCoord(coord: LatticeCoord, axis: Axis): LatticeCoord {
+  const out: LatticeCoord = [coord[0], coord[1], coord[2]];
+  out[AXIS_INDEX[axis]] = -out[AXIS_INDEX[axis]];
+  return out;
+}
+
+/**
+ * The mirror image of a face, added.
+ *
+ * Reflecting reverses handedness, so the winding is reversed too — otherwise
+ * every mirrored face comes out inside-out and the export is a solid with half
+ * its surface facing in.
+ */
+export function mirrorFace(lattice: Lattice, face: number, axis: Axis): number {
+  const verts = lattice.faces[face];
+  if (!verts) return -1;
+  const reflected = verts.map((v) => {
+    const [i, j, k] = mirrorCoord(coordOf(lattice, v), axis);
+    return vertexAt(lattice, i, j, k);
+  });
+  reflected.reverse();
+  return addFace(lattice, reflected);
+}
+
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the surface is closed.
+ *
+ * Reported rather than enforced: an open surface is a perfectly good thing to
+ * be halfway through making, and it is only downstream — a mold, a relief
+ * carve, a 3MF — that it becomes a file nobody will accept. The panel shows it
+ * because nothing in the viewport does.
+ */
+export function isWatertight(lattice: Lattice): boolean {
+  const uses = new Map<string, number>();
+  let any = false;
+  for (const verts of lattice.faces) {
+    if (!verts) continue;
+    any = true;
+    for (let i = 0; i < verts.length; i++) {
+      const a = verts[i];
+      const b = verts[(i + 1) % verts.length];
+      const edge = a < b ? `${a}:${b}` : `${b}:${a}`;
+      uses.set(edge, (uses.get(edge) ?? 0) + 1);
+    }
+  }
+  if (!any) return false;
+  for (const count of uses.values()) if (count !== 2) return false;
+  return true;
+}
+
+/** Grid-step bounds of everything placed, or null when nothing has been. */
+export function latticeBounds(lattice: Lattice): { min: LatticeCoord; max: LatticeCoord } | null {
+  const used = usedVertices(lattice);
+  if (used.length === 0) return null;
+  const min: LatticeCoord = [Infinity, Infinity, Infinity];
+  const max: LatticeCoord = [-Infinity, -Infinity, -Infinity];
+  for (const v of used) {
+    const c = coordOf(lattice, v);
+    for (let a = 0; a < 3; a++) {
+      if (c[a] < min[a]) min[a] = c[a];
+      if (c[a] > max[a]) max[a] = c[a];
+    }
+  }
+  return { min, max };
+}
+
+/** The vertices some face still uses, in index order. */
+function usedVertices(lattice: Lattice): number[] {
+  const used = new Set<number>();
+  for (const verts of lattice.faces) {
+    if (!verts) continue;
+    for (const v of verts) used.add(v);
+  }
+  return [...used].sort((a, b) => a - b);
+}
+
+export function latticeStats(lattice: Lattice) {
+  let quads = 0;
+  let tris = 0;
+  for (const verts of lattice.faces) {
+    if (!verts) continue;
+    if (verts.length === 4) quads++;
+    else if (verts.length === 3) tris++;
+  }
+  return {
+    vertices: usedVertices(lattice).length,
+    faces: faceCount(lattice),
+    quads,
+    tris,
+    watertight: isWatertight(lattice),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Out to a mesh
+// ---------------------------------------------------------------------------
+
+/** The cage as metric polygons, Z-up, dropping orphaned vertices. */
+export function toPolyMesh(lattice: Lattice): PolyMesh {
+  const used = usedVertices(lattice);
+  const remap = new Map<number, number>();
+  const positions: number[] = [];
+  for (const v of used) {
+    remap.set(v, positions.length / 3);
+    positions.push(
+      lattice.coords[v * 3] * lattice.unit,
+      lattice.coords[v * 3 + 1] * lattice.unit,
+      lattice.coords[v * 3 + 2] * lattice.unit,
+    );
+  }
+  const faces: number[][] = [];
+  for (const verts of lattice.faces) {
+    if (!verts) continue;
+    faces.push(verts.map((v) => remap.get(v)!));
+  }
+  return { positions, faces };
+}
+
+/** Triangulates a polygon by fanning from its first corner. */
+function triangulate(faces: number[][]): number[] {
+  const out: number[] = [];
+  for (const face of faces) {
+    for (let i = 1; i + 1 < face.length; i++) out.push(face[0], face[i], face[i + 1]);
+  }
+  return out;
+}
+
+/**
+ * The shape as a `SceneGeom` pair, optionally smoothed.
+ *
+ * `subdivLevel` is applied HERE rather than kept as a display setting, because
+ * everything downstream — the physics, the STL, the relief carve — has to see
+ * the shape that was meant, not the blocky cage that produced it. The cage is
+ * drawn separately as an overlay, and is preserved on the node so it can be
+ * edited again (see `serializeCage`); it cannot be recovered from this.
+ */
+export function toSceneGeom(
+  lattice: Lattice,
+  subdivLevel = 0,
+): { vertices: number[]; renderVertices: number[]; faces: number[] } {
+  const poly = subdivLevel > 0 ? subdivide(toPolyMesh(lattice), subdivLevel) : toPolyMesh(lattice);
+
+  const count = poly.positions.length / 3;
+  const renderVertices = new Array<number>(count * 3);
+  const vertices = new Array<number>(count * 3);
+  for (let i = 0; i < count; i++) {
+    const x = poly.positions[i * 3];
+    const y = poly.positions[i * 3 + 1];
+    const z = poly.positions[i * 3 + 2];
+    renderVertices[i * 3] = x;
+    renderVertices[i * 3 + 1] = y;
+    renderVertices[i * 3 + 2] = z;
+    // Same Z-up -> Y-up swap as sculptMesh.toSceneGeom, so a lattice body and a
+    // sculpted one arrive at the renderer identically.
+    vertices[i * 3] = x;
+    vertices[i * 3 + 1] = z;
+    vertices[i * 3 + 2] = -y;
+  }
+
+  return { vertices, renderVertices, faces: triangulate(poly.faces) };
+}
+
+/** The cage's edges, as vertex index pairs, for drawing the wireframe. */
+export function cageEdges(lattice: Lattice): number[] {
+  const seen = new Set<string>();
+  const out: number[] = [];
+  for (const verts of lattice.faces) {
+    if (!verts) continue;
+    for (let i = 0; i < verts.length; i++) {
+      const a = verts[i];
+      const b = verts[(i + 1) % verts.length];
+      const edge = a < b ? `${a}:${b}` : `${b}:${a}`;
+      if (seen.has(edge)) continue;
+      seen.add(edge);
+      out.push(a, b);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+export interface LatticeCage {
+  unit: number;
+  /** Three integers per vertex, orphans already dropped. */
+  coords: number[];
+  /** Face corners back to back; `faceSizes` says where each one ends. */
+  faces: number[];
+  faceSizes: number[];
+}
+
+/**
+ * The cage in a form that survives being saved.
+ *
+ * A lattice body's geom holds the SUBDIVIDED mesh, which cannot be turned back
+ * into the cage that made it — so without this, saving a document and reopening
+ * it would leave a lattice that can be looked at and never edited again.
+ * Compacted on the way out: tombstoned faces and orphaned vertices are the
+ * bookkeeping of one session, not part of the shape.
+ */
+export function serializeCage(lattice: Lattice): LatticeCage {
+  const used = usedVertices(lattice);
+  const remap = new Map<number, number>();
+  const coords: number[] = [];
+  for (const v of used) {
+    remap.set(v, coords.length / 3);
+    coords.push(lattice.coords[v * 3], lattice.coords[v * 3 + 1], lattice.coords[v * 3 + 2]);
+  }
+  const faces: number[] = [];
+  const faceSizes: number[] = [];
+  for (const verts of lattice.faces) {
+    if (!verts) continue;
+    faceSizes.push(verts.length);
+    for (const v of verts) faces.push(remap.get(v)!);
+  }
+  return { unit: lattice.unit, coords, faces, faceSizes };
+}
+
+export function deserializeCage(cage: LatticeCage): Lattice {
+  const lattice = createLattice(cage.unit ?? DEFAULT_UNIT);
+  const vertices: number[] = [];
+  for (let i = 0; i < cage.coords.length; i += 3) {
+    vertices.push(vertexAt(lattice, cage.coords[i], cage.coords[i + 1], cage.coords[i + 2]));
+  }
+  let at = 0;
+  for (const size of cage.faceSizes) {
+    const verts: number[] = [];
+    for (let i = 0; i < size; i++) verts.push(vertices[cage.faces[at + i]]);
+    at += size;
+    addFace(lattice, verts);
+  }
+  return lattice;
+}
+
+/**
+ * A shallow copy deep enough to undo onto.
+ *
+ * The undo history here is snapshots rather than inverse operations, which is
+ * the opposite of what utils/sculptMesh.ts does — and for the opposite reason.
+ * A sculpt stroke touches a mesh of a quarter of a million vertices, so a
+ * snapshot per stroke is megabytes and the history has to be built out of
+ * deltas. A cage is coarse by construction; a hundred of these is smaller than
+ * one sculpt stroke, and a snapshot cannot get an inverse subtly wrong.
+ */
+export function cloneLattice(lattice: Lattice): Lattice {
+  const copy = createLattice(lattice.unit);
+  copy.coords = [...lattice.coords];
+  copy.index = new Map(lattice.index);
+  copy.faces = lattice.faces.map((face) => (face ? [...face] : null));
+  copy.vertexFaces = new Map();
+  for (const [v, set] of lattice.vertexFaces) copy.vertexFaces.set(v, new Set(set));
+  copy.revision = lattice.revision;
+  return copy;
+}
+
+/** Puts a snapshot back, in place, so holders of the live lattice see it. */
+export function restoreLattice(lattice: Lattice, snapshot: Lattice) {
+  lattice.unit = snapshot.unit;
+  lattice.coords = [...snapshot.coords];
+  lattice.index = new Map(snapshot.index);
+  lattice.faces = snapshot.faces.map((face) => (face ? [...face] : null));
+  lattice.vertexFaces = new Map();
+  for (const [v, set] of snapshot.vertexFaces) lattice.vertexFaces.set(v, new Set(set));
+  lattice.revision++;
+}
