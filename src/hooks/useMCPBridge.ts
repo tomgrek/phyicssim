@@ -22,6 +22,13 @@ import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames }
 import { SCULPT_BASES } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
+import {
+  addFacesMm, describeLattice, extrudeMm, latticeSummary, removeFacesMm,
+} from '../utils/latticeCommands';
+import {
+  boxLattice, cloneLattice, deserializeCage, serializeCage, DEFAULT_UNIT as LATTICE_UNIT,
+  type Axis as LatticeAxis, type Lattice,
+} from '../utils/latticeMesh';
 import type { SculptUndoEntry } from '../utils/sculptMesh';
 
 /**
@@ -33,6 +40,17 @@ import type { SculptUndoEntry } from '../utils/sculptMesh';
  * Capped because each entry can hold a copy of the mesh.
  */
 const sculptHistory = new Map<string, SculptUndoEntry[]>();
+
+/**
+ * The last few cages of each lattice body, so an operation can be taken back off.
+ *
+ * Whole snapshots rather than inverse operations, as everywhere else this mode
+ * keeps history: a cage is a few hundred integers, and a snapshot cannot get an
+ * inverse subtly wrong. Separate from the editor's own history, so undoing over
+ * MCP never swallows a person's work.
+ */
+const latticeHistory = new Map<string, Lattice[]>();
+const LATTICE_HISTORY_DEPTH = 8;
 const SCULPT_HISTORY_DEPTH = 8;
 
 const autoCompileScad = async (nodes: any[]) => {
@@ -164,6 +182,46 @@ function findNewNode(nodes: any[], before: Set<string>): any | null {
  * renderVertices, not vertices: that is the Z-up copy sculptMesh works in, and
  * the one toSceneGeom will write back.
  */
+/** The editable cage on a node, or a refusal that says what to do instead. */
+function latticeOf(node: any): Lattice {
+  if (!node?.latticeCage) {
+    throw new Error(`'${node?.id}' has no lattice cage`);
+  }
+  return deserializeCage(node.latticeCage);
+}
+
+/** Resolves an id to a lattice body and its cage, or explains why it is not one. */
+function latticeTarget(store: any, targetId: string): { node: any; lattice: Lattice } {
+  if (!targetId) throw new Error('Missing targetId');
+  const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+  if (!node) throw new Error(`No object with id '${targetId}'`);
+  if (!node.isLattice || !node.latticeCage) {
+    throw new Error(`'${targetId}' is not a lattice body — make one with physics_create_lattice. There is no conversion: the cage is the document, and a primitive, an imported mesh or a sculpt does not have one.`);
+  }
+  return { node, lattice: deserializeCage(node.latticeCage) };
+}
+
+function pushLatticeHistory(targetId: string, snapshot: Lattice) {
+  const stack = latticeHistory.get(targetId) ?? [];
+  stack.push(snapshot);
+  while (stack.length > LATTICE_HISTORY_DEPTH) stack.shift();
+  latticeHistory.set(targetId, stack);
+}
+
+/**
+ * Writes a cage back and rebuilds the body from it.
+ *
+ * The version bump comes first and separately: the editor holds its own live
+ * copy of the cage while it is open, and only a change of version tells it to
+ * load this one rather than carry on with what it has — the same signal
+ * setSculptBase sends when it swaps a mesh out.
+ */
+function commitLattice(node: any, lattice: Lattice) {
+  const store = useStore.getState();
+  store.updateNode(node.id, { latticeVersion: (node.latticeVersion ?? 1) + 1 });
+  store.applyLattice(node.id, serializeCage(lattice), node.latticeSubdiv ?? 0);
+}
+
 function sculptMeshOf(node: any) {
   const geom = (node?.geoms ?? []).find((g: any) => g.type === 'mesh');
   if (!geom?.renderVertices?.length || !geom?.faces?.length) {
@@ -842,6 +900,120 @@ export function useMCPBridge() {
           store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
           return { ok: true, id: targetId, undoDepth: stack.length, ...sculptSummary(mesh) };
+        }
+
+        /*
+          Lattice modelling, driven by coordinates.
+
+          The one thing in this app that is EASIER to drive without a screen than
+          with one: the whole state is integers on a grid, so "the corner at
+          20, -10, 0" is exactly a corner, is the same corner on the next call,
+          and comes back out of physics_get_lattice in the form it went in.
+          Callers speak millimetres in the body's own frame; see
+          utils/latticeCommands.ts.
+        */
+        case 'CREATE_LATTICE': {
+          const { name, pos, sizeMm, edit } = msg;
+          const position = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0.2];
+          const size = typeof sizeMm === 'number' && sizeMm > 0 ? sizeMm : 40;
+          const halfSteps = Math.max(1, Math.round((size / 2) / (LATTICE_UNIT * 1000)));
+
+          // Same trap as CREATE_SCULPT: addComponent mints its own id, finishes
+          // asynchronously, and may parent the new body under the selection.
+          const before = collectNodeIds(store.sceneGraph.nodes);
+          store.setParentUnderSelected(false);
+          store.addComponent('lattice', position);
+
+          const created = await waitForNewNode(before, 10000);
+          if (!created) throw new Error('The lattice body was not created (timed out waiting for the scene to settle)');
+          if (typeof name === 'string' && name.trim()) store.renameNode(created.id, name.trim());
+
+          if (size !== 40) {
+            const cage = serializeCage(boxLattice(LATTICE_UNIT, halfSteps));
+            useStore.getState().applyLattice(created.id, cage, 0);
+          }
+          // Opening the tools is opt-in: it takes over the viewport and pauses
+          // the simulation, which is rude to do to somebody mid-task, but it is
+          // exactly what is wanted when a person is about to carry on by hand.
+          if (edit) useStore.getState().setLatticeNodeId(created.id);
+
+          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, created.id);
+          return {
+            ok: true, id: created.id, name: after?.name,
+            ...latticeSummary(latticeOf(after)),
+          };
+        }
+
+        case 'LATTICE_FACES': {
+          const { targetId, faces, mirror } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = addFacesMm(lattice, faces, mirror as LatticeAxis | undefined);
+          if (result.added === 0) {
+            return { ok: false, id: targetId, error: 'No face was added', ...result, ...latticeSummary(lattice) };
+          }
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_EXTRUDE': {
+          const { targetId, face, distanceMm, axis, mirror } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          if (typeof distanceMm !== 'number' || !Number.isFinite(distanceMm)) {
+            throw new Error('distanceMm must be a number of millimetres to push the face out by');
+          }
+          const before = cloneLattice(lattice);
+          const result = extrudeMm(lattice, face, distanceMm, axis as LatticeAxis | undefined, mirror as LatticeAxis | undefined);
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_DELETE_FACES': {
+          const { targetId, faces, mirror } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = removeFacesMm(lattice, faces, mirror as LatticeAxis | undefined);
+          if (result.removed === 0) {
+            return { ok: false, id: targetId, error: 'No face was removed', ...result, ...latticeSummary(lattice) };
+          }
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_SMOOTH': {
+          const { targetId, level } = msg;
+          const { node } = latticeTarget(store, targetId);
+          const wanted = Math.max(0, Math.min(2, Math.round(Number(level) || 0)));
+          useStore.getState().setLatticeSubdiv(node.id, wanted);
+          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
+          const mesh = after?.geoms?.find((g: any) => g.type === 'mesh');
+          return {
+            ok: true, id: node.id, level: wanted,
+            ...latticeSummary(latticeOf(after)),
+            // The cage is unchanged; what smoothing changes is the mesh built
+            // from it, which is what everything downstream actually sees.
+            meshTriangles: mesh?.faces ? mesh.faces.length / 3 : 0,
+          };
+        }
+
+        case 'UNDO_LATTICE': {
+          const { targetId } = msg;
+          const { node } = latticeTarget(store, targetId);
+          const stack = latticeHistory.get(node.id) ?? [];
+          const snapshot = stack.pop();
+          if (!snapshot) return { ok: false, error: 'No lattice operation of mine left to undo on this body', undoDepth: 0 };
+          latticeHistory.set(node.id, stack);
+          commitLattice(node, snapshot);
+          return { ok: true, id: node.id, undoDepth: stack.length, ...latticeSummary(snapshot) };
+        }
+
+        case 'GET_LATTICE': {
+          const { targetId } = msg;
+          const { lattice } = latticeTarget(store, targetId);
+          return { ok: true, id: targetId, ...describeLattice(lattice) };
         }
 
         case 'PROBE_SCULPT': {
