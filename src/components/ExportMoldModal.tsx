@@ -20,7 +20,7 @@ import {
   type MoldHalfBuffers,
 } from '../utils/moldExporter';
 import { MoldWorkerClient, type MoldPreview } from '../utils/moldWorkerClient';
-import { NumberInput } from './NumberInput';
+import { NumberInput } from '@physbox-io/ui';
 import { CastingGuide } from './CastingGuide';
 import { HintAnchor } from './ExportFields';
 
@@ -134,8 +134,10 @@ const EMPTY_SUMMARY: MoldSummary = moldSummary(emptyMoldResult());
 
 export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
   const [options, setOptions] = useState<MoldOptions>(DEFAULT_MOLD_OPTIONS);
-  const set = <K extends keyof MoldOptions>(key: K, value: MoldOptions[K]) =>
+  const set = <K extends keyof MoldOptions>(key: K, value: MoldOptions[K] | undefined) => {
+    if (value === undefined) return;
     setOptions((prev) => ({ ...prev, [key]: value }));
+  };
 
   const [viewMode, setViewMode] = useState<PreviewViewMode>('clamshell_exploded');
   const [isXRay, setIsXRay] = useState(false);

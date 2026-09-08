@@ -19,7 +19,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { clockMoves, formatDuration, type ClockedMove, type TimedMove } from '../utils/timeEstimate';
 import { MATERIALS, describeSpeedRecommendation, recommendSpeeds } from '../utils/feedsAndSpeeds';
 import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
-import { NumberInput } from './NumberInput';
+import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { FdmNotice } from './FdmNotice';
 import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
@@ -1106,8 +1106,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     setSyncedMaterial(storeMaterial);
     setOptions((prev) => ({ ...prev, material: storeMaterial }));
   }
-  const set = <K extends keyof ReliefCarveOptions>(key: K, value: ReliefCarveOptions[K]) =>
+  const set = <K extends keyof ReliefCarveOptions>(key: K, value: ReliefCarveOptions[K] | undefined) => {
+    if (value === undefined) return;
     setOptions((prev) => ({ ...prev, [key]: value }));
+  };
 
   /**
    * Feeds and speeds the operator has taken over.
@@ -1121,10 +1123,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
    */
   const [overrides, setOverrides] = useState<ReliefOverrides>({});
   /** Typing a number takes a field over; clearing it hands it back to the recipe. */
-  const override = <K extends keyof ReliefOverrides>(key: K, value: number | null) =>
+  const override = <K extends keyof ReliefOverrides>(key: K, value: number | undefined) =>
     setOverrides((prev) => {
       const next = { ...prev };
-      if (value === null) delete next[key];
+      if (value === undefined) delete next[key];
       else next[key] = value;
       return next;
     });
@@ -1998,7 +2000,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   <NumberInput
                     step={1} min={2} max={15} integer
                     value={probeCols}
-                    onChange={setProbeCols}
+                    onChange={(v) => v !== undefined && setProbeCols(v)}
                     className={`${inputClass} px-2`}
                     aria-label="Probe points across X"
                   />
@@ -2006,7 +2008,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   <NumberInput
                     step={1} min={2} max={15} integer
                     value={probeRows}
-                    onChange={setProbeRows}
+                    onChange={(v) => v !== undefined && setProbeRows(v)}
                     className={`${inputClass} px-2`}
                     aria-label="Probe points across Y"
                   />

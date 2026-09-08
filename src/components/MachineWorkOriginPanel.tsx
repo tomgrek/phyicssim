@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, ChevronsUp, ChevronsDown, Crosshair, Lightbulb, Navigation, Octagon, Info, Check, Hand, AlertTriangle } from 'lucide-react';
-import { NumberInput } from './NumberInput';
+import { NumberInput } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import {
   MAX_GUIDE_POWER_PCT,
@@ -235,7 +235,7 @@ export const MachineWorkOriginPanel: React.FC<{
               step={50}
               integer
               value={feedrate}
-              onChange={setFeedrate}
+              onChange={(v) => v !== undefined && setFeedrate(v)}
               className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-800 dark:text-slate-200"
             />
             <span className="text-[10px] text-slate-500">mm/min</span>
@@ -298,6 +298,7 @@ export const MachineWorkOriginPanel: React.FC<{
                     step={0.1}
                     value={guidePower}
                     onChange={(v) => {
+                      if (v === undefined) return;
                       const next = writeGuidePower(v);
                       setGuidePower(next);
                       // Re-fired at the new power while it is lit, so "raise it
@@ -378,7 +379,7 @@ export const MachineWorkOriginPanel: React.FC<{
                     max={100}
                     step={0.1}
                     value={gaugeThickness}
-                    onChange={setGaugeThickness}
+                    onChange={(v) => v !== undefined && setGaugeThickness(v)}
                     title="Anything between the tip and the surface — a slip of paper is about 0.1 mm, a 1-2-3 block is 25.4. Leave at 0 when the bit is touching the work itself."
                     className="w-16 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-800 dark:text-slate-200"
                   />
@@ -397,7 +398,7 @@ export const MachineWorkOriginPanel: React.FC<{
                     max={100}
                     step={0.1}
                     value={plateThickness}
-                    onChange={setPlateThickness}
+                    onChange={(v) => v !== undefined && setPlateThickness(v)}
                     title="Touch plate thickness — work Z 0 ends up this far below the plate's top face"
                     className="w-16 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-800 dark:text-slate-200"
                   />

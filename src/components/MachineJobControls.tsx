@@ -3,7 +3,7 @@ import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw 
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 import { formatDuration } from '../utils/timeEstimate';
-import { NumberInput } from './NumberInput';
+import { NumberInput } from '@physbox-io/ui';
 
 /**
  * Running a job from the browser: stop it, pick it up again, and deal with what
@@ -217,7 +217,7 @@ export const JobResumeBanner: React.FC<{
             min={0}
             max={resume.totalLines}
             value={target}
-            onChange={v => setLine(Math.max(0, Math.min(resume.totalLines, v)))}
+            onChange={v => v !== undefined && setLine(Math.max(0, Math.min(resume.totalLines, v)))}
                       className="w-24 bg-white dark:bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px] text-slate-800 dark:text-slate-100"
             title="Back this off a little to recut the last stretch, which is usually safer than trying to land exactly on the break"
                       integer

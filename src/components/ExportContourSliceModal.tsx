@@ -6,7 +6,7 @@ import type { SceneGraph } from '../types/scene';
 import { exportContourSliceSvg, type ContourSliceOptions } from '../utils/contourSliceExporter';
 import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { NumberInput } from './NumberInput';
+import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { FdmNotice } from './FdmNotice';
 import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
@@ -404,7 +404,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 <NumberInput
                   step={0.5} min={0.1} max={50}
                   value={materialThicknessMm}
-                  onChange={setMaterialThicknessMm}
+                  onChange={(v) => v !== undefined && setMaterialThicknessMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -429,7 +429,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   step={laserMaxPower >= 10000 ? 500 : 50} min={0} max={laserMaxPower} integer
                   disabled={machineMode !== 'laser'}
                   value={laserPower}
-                  onChange={setLaserPower}
+                  onChange={(v) => v !== undefined && setLaserPower(v)}
                   className={inputClass}
                 />
               </Field>
@@ -443,7 +443,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   step={1} min={1} max={20} integer
                   disabled={machineMode !== 'laser'}
                   value={laserPasses}
-                  onChange={setLaserPasses}
+                  onChange={(v) => v !== undefined && setLaserPasses(v)}
                   className={inputClass}
                 />
               </Field>
@@ -492,7 +492,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   allowEmpty
                   placeholder={String(machineMode === 'cnc' ? speeds.feedMmMin : 1200)}
                   value={cutFeedrateOverride}
-                  onChange={setCutFeedrateOverride}
+                  onChange={(v) => v !== undefined && setCutFeedrateOverride(v)}
                   className={inputClass}
                 />
               </Field>
@@ -506,7 +506,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   allowEmpty
                   placeholder={String(speeds.rpm)}
                   value={spindleRpmOverride}
-                  onChange={setSpindleRpmOverride}
+                  onChange={(v) => v !== undefined && setSpindleRpmOverride(v)}
                   className={inputClass}
                 />
               </Field>
@@ -519,7 +519,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   step={0.1} min={0.1} max={30}
                   disabled={machineMode !== 'cnc'}
                   value={bitDiameterMm}
-                  onChange={setBitDiameterMm}
+                  onChange={(v) => v !== undefined && setBitDiameterMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -547,7 +547,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 <NumberInput
                   step={0.05} min={0} max={2}
                   value={kerfMm}
-                  onChange={setKerfMm}
+                  onChange={(v) => v !== undefined && setKerfMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -572,7 +572,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   step={0.5} min={0.5} max={30}
                   disabled={!attachments}
                   value={attachmentWidthMm}
-                  onChange={setAttachmentWidthMm}
+                  onChange={(v) => v !== undefined && setAttachmentWidthMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -585,7 +585,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   step={10} min={5} max={1000}
                   disabled={!attachments}
                   value={attachmentSpacingMm}
-                  onChange={setAttachmentSpacingMm}
+                  onChange={(v) => v !== undefined && setAttachmentSpacingMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -599,7 +599,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   step={0.1} min={0.1} max={10}
                   disabled={!attachments || machineMode !== 'cnc'}
                   value={attachmentHeightMm}
-                  onChange={setAttachmentHeightMm}
+                  onChange={(v) => v !== undefined && setAttachmentHeightMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -617,7 +617,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               >
                 <Segmented
                   value={slicePosition}
-                  onChange={setSlicePosition}
+                  onChange={(v) => v !== undefined && setSlicePosition(v)}
                   options={[['bottom', 'Bottom'], ['middle', 'Middle'], ['top', 'Top']] as const}
                 />
               </Field>
@@ -648,7 +648,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   step={0.5} min={0.5} max={20}
                   disabled={pinCount === 0}
                   value={pinDiameterMm}
-                  onChange={setPinDiameterMm}
+                  onChange={(v) => v !== undefined && setPinDiameterMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -668,7 +668,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   <NumberInput
                     step={10} min={50} max={5000}
                     value={sheetWidthMm}
-                    onChange={setSheetWidthMm}
+                    onChange={(v) => v !== undefined && setSheetWidthMm(v)}
                     className={`${inputClass} px-2`}
                     aria-label="Sheet width in mm"
                   />
@@ -676,7 +676,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   <NumberInput
                     step={10} min={50} max={5000}
                     value={sheetHeightMm}
-                    onChange={setSheetHeightMm}
+                    onChange={(v) => v !== undefined && setSheetHeightMm(v)}
                     className={`${inputClass} px-2`}
                     aria-label="Sheet height in mm"
                   />
@@ -706,7 +706,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                     min={1} max={20} step={1} integer
                     disabled={!autoScale}
                     value={maxSheets}
-                    onChange={setMaxSheets}
+                    onChange={(v) => v !== undefined && setMaxSheets(v)}
                     className={`${inputClass} px-2`}
                   />
                   <span className="text-xs text-slate-500 font-medium whitespace-nowrap">sheet(s)</span>
@@ -748,7 +748,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               >
                 <Segmented
                   value={annotations}
-                  onChange={setAnnotations}
+                  onChange={(v) => v !== undefined && setAnnotations(v)}
                   options={[['all', 'Numbers'], ['sheets', 'Outlines'], ['none', 'Cuts only']] as const}
                 />
               </Field>
@@ -813,7 +813,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 </div>
                 <Segmented
                   value={preview}
-                  onChange={setPreview}
+                  onChange={(v) => v !== undefined && setPreview(v)}
                   options={[['sheets', 'Cut sheets'], ['map', 'Relief map']] as const}
                 />
               </div>

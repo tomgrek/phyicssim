@@ -6,7 +6,7 @@ import type { SceneGraph } from '../types/scene';
 import { exportLaserCutSvg, type LaserCutOptions } from '../utils/laserCutExporter';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { NumberInput } from './NumberInput';
+import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { FdmNotice } from './FdmNotice';
 import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
@@ -430,7 +430,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 <NumberInput
                   step={0.5} min={0.5} max={50}
                   value={materialThicknessMm}
-                  onChange={setMaterialThicknessMm}
+                  onChange={(v) => v !== undefined && setMaterialThicknessMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -455,7 +455,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={laserMaxPower >= 10000 ? 500 : 50} min={0} max={laserMaxPower} integer
                   disabled={machineMode !== 'laser'}
                   value={laserPower}
-                  onChange={setLaserPower}
+                  onChange={(v) => v !== undefined && setLaserPower(v)}
                   className={inputClass}
                 />
               </Field>
@@ -470,7 +470,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={1} min={1} max={20} integer
                   disabled={machineMode !== 'laser'}
                   value={laserPasses}
-                  onChange={setLaserPasses}
+                  onChange={(v) => v !== undefined && setLaserPasses(v)}
                   className={inputClass}
                 />
               </Field>
@@ -509,7 +509,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={0.1} min={0.1} max={50}
                   disabled={machineMode !== 'cnc' && cornerRelief === 'none'}
                   value={bitDiameterMm}
-                  onChange={setBitDiameterMm}
+                  onChange={(v) => v !== undefined && setBitDiameterMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -522,7 +522,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   allowEmpty
                   placeholder={String(machineMode === 'cnc' ? speeds.feedMmMin : 1200)}
                   value={cutFeedrateOverride}
-                  onChange={setCutFeedrateOverride}
+                  onChange={(v) => v !== undefined && setCutFeedrateOverride(v)}
                   className={inputClass}
                 />
               </Field>
@@ -536,7 +536,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   allowEmpty
                   placeholder={String(speeds.rpm)}
                   value={spindleRpmOverride}
-                  onChange={setSpindleRpmOverride}
+                  onChange={(v) => v !== undefined && setSpindleRpmOverride(v)}
                   className={inputClass}
                 />
               </Field>
@@ -564,7 +564,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 <NumberInput
                   step={0.05} min={0} max={2.0}
                   value={kerfMm}
-                  onChange={setKerfMm}
+                  onChange={(v) => v !== undefined && setKerfMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -589,7 +589,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={0.5} min={0.5} max={30}
                   disabled={!attachments}
                   value={attachmentWidthMm}
-                  onChange={setAttachmentWidthMm}
+                  onChange={(v) => v !== undefined && setAttachmentWidthMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -602,7 +602,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={10} min={5} max={1000}
                   disabled={!attachments}
                   value={attachmentSpacingMm}
-                  onChange={setAttachmentSpacingMm}
+                  onChange={(v) => v !== undefined && setAttachmentSpacingMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -616,7 +616,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={0.1} min={0.1} max={10}
                   disabled={!attachments || machineMode !== 'cnc'}
                   value={attachmentHeightMm}
-                  onChange={setAttachmentHeightMm}
+                  onChange={(v) => v !== undefined && setAttachmentHeightMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -634,7 +634,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               >
                 <Segmented
                   value={jointMode}
-                  onChange={setJointMode}
+                  onChange={(v) => v !== undefined && setJointMode(v)}
                   options={[['finger', 'Finger Joints'], ['slot', 'Tab & Slot'], ['glue', 'Glue (Plain)']] as const}
                 />
               </Field>
@@ -649,7 +649,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={1} min={3} max={50}
                   disabled={jointMode === 'glue'}
                   value={fingerWidthMm}
-                  onChange={setFingerWidthMm}
+                  onChange={(v) => v !== undefined && setFingerWidthMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -665,7 +665,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={0.05} min={-1} max={1}
                   disabled={jointMode === 'glue'}
                   value={jointClearanceMm}
-                  onChange={setJointClearanceMm}
+                  onChange={(v) => v !== undefined && setJointClearanceMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -680,7 +680,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step={0.5} min={0} max={20}
                   disabled={jointMode === 'glue'}
                   value={tabOverhangMm}
-                  onChange={setTabOverhangMm}
+                  onChange={(v) => v !== undefined && setTabOverhangMm(v)}
                   className={inputClass}
                 />
               </Field>
@@ -692,7 +692,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               >
                 <Segmented
                   value={cornerRelief}
-                  onChange={setCornerRelief}
+                  onChange={(v) => v !== undefined && setCornerRelief(v)}
                   options={[['none', 'Laser (None)'], ['dogbone', 'Dogbone'], ['tbone', 'T-Bone']] as const}
                 />
               </Field>
@@ -713,7 +713,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   <NumberInput
                     step={10} min={50} max={5000}
                     value={sheetWidthMm}
-                    onChange={setSheetWidthMm}
+                    onChange={(v) => v !== undefined && setSheetWidthMm(v)}
                     className={`${inputClass} px-2`}
                     aria-label="Sheet width in mm"
                   />
@@ -721,7 +721,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   <NumberInput
                     step={10} min={50} max={5000}
                     value={sheetHeightMm}
-                    onChange={setSheetHeightMm}
+                    onChange={(v) => v !== undefined && setSheetHeightMm(v)}
                     className={`${inputClass} px-2`}
                     aria-label="Sheet height in mm"
                   />
@@ -751,7 +751,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     min={1} max={20} step={1} integer
                     disabled={!autoScale}
                     value={maxSheets}
-                    onChange={setMaxSheets}
+                    onChange={(v) => v !== undefined && setMaxSheets(v)}
                     className={`${inputClass} px-2`}
                   />
                   <span className="text-xs text-slate-500 font-medium whitespace-nowrap">sheet(s)</span>
