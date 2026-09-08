@@ -13,9 +13,10 @@
 //
 // It has an honest answer in the case that matters, though: a point that is
 // ALREADY THERE. So the pointer resolves in two stages. Anything already drawn
-// — every corner of the cage, and every dot in the visible slab — is picked
-// directly by nearness to the ray, whichever plane it happens to lie on, so any
-// grid point can be connected to any other and a face can span depths freely.
+// — every corner of the cage, and every dot in the field, which is drawn as a
+// whole cube — is picked directly by nearness to the ray, whichever plane it
+// happens to lie on, so any grid point can be connected to any other and a face
+// can span depths freely.
 // Only when the ray passes nothing already there does the active plane step in
 // to say how deep a NEW point should be, which is the one case with nothing
 // else to go on. The plane constrains where points are born, never what may be
@@ -39,14 +40,21 @@ import {
   AXIS_INDEX, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
 } from '../utils/latticeMesh';
 
-/** How many planes either side of the active one are hinted at. */
+/** How many planes either side of the active one are drawn at full legibility. */
 const NEIGHBOUR_PLANES = 2;
 
 /** Steps of empty grid drawn around whatever has been built so far. */
 const FIELD_MARGIN = 6;
 
-/** Ceiling on dots per row, so a big model does not turn into a fog of points. */
-const MAX_FIELD_SPAN = 41;
+/**
+ * Ceiling on dots per row.
+ *
+ * The field is a cube, so this is cubed: 25 is about fifteen thousand points,
+ * which draws in one call and can be scanned per pointer-move without being
+ * felt. It is also the point past which more dots stop helping — a volume dense
+ * enough to be a fog is one you cannot pick anything out of anyway.
+ */
+const MAX_FIELD_SPAN = 25;
 
 export interface LatticeSurfaceProps {
   nodeId: string;
@@ -273,11 +281,18 @@ export function LatticeSurface({
   }, [handles, position, revision]);
 
   /** Where the dot field runs to, in grid steps, on each in-plane axis. */
+  /**
+   * The volume the grid is drawn over, in grid steps, on all three axes.
+   *
+   * All three, not the two in the work plane: the field is a cube of dots you
+   * can see through and reach into, because the whole point of the mode is
+   * joining a point to another point at a different depth, and a grid you
+   * cannot see the depth of makes you take that on trust.
+   */
   const field = useMemo(() => {
     const bounds = latticeBounds(lattice);
     const min: LatticeCoord = bounds ? [...bounds.min] : [0, 0, 0];
     const max: LatticeCoord = bounds ? [...bounds.max] : [0, 0, 0];
-    const [a, b] = OTHER_AXES[plane.axis];
     const range = (axis: 0 | 1 | 2) => {
       // The margin is in steps of the CURRENT grid, so coarse work gets a
       // proportionally wide field and fine work gets a tight one — a fixed
@@ -295,39 +310,44 @@ export function LatticeSurface({
       }
       return { lo, hi };
     };
-    return { a, b, ranges: [range(a), range(b)] };
-  }, [lattice, plane.axis, revision, snap]); // eslint-disable-line react-hooks/exhaustive-deps
+    return { ranges: [range(0), range(1), range(2)] as const };
+  }, [lattice, revision, snap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const dotTexture = useMemo(() => makeDotTexture(), []);
 
   const dots = useMemo(() => {
+    // Three depths of emphasis rather than one field at one opacity. A cube of
+    // dots at uniform brightness is a fog: you can see that there is a grid and
+    // not where anything is in it. The active plane is picked out, its
+    // neighbours are legible, and the rest of the volume is present enough to
+    // aim at and faint enough to see the model through.
     const active: number[] = [];
-    const nearby: number[] = [];
-    // Every dot drawn is a dot that can be clicked, whichever plane it is on,
-    // so the coordinates are kept rather than thrown away with the buffer.
+    const near: number[] = [];
+    const far: number[] = [];
+    // Every dot drawn is a dot that can be clicked, so the coordinates are kept
+    // rather than thrown away with the buffer.
     const coords: LatticeCoord[] = [];
-    const { a, b, ranges } = field;
+    const { ranges } = field;
     const axis = AXIS_INDEX[plane.axis];
-    for (let offset = -NEIGHBOUR_PLANES; offset <= NEIGHBOUR_PLANES; offset++) {
-      const target = offset === 0 ? active : nearby;
-      const index = plane.index + offset * snap;
-      for (let u = ranges[0].lo; u <= ranges[0].hi; u += snap) {
-        for (let v = ranges[1].lo; v <= ranges[1].hi; v += snap) {
-          const coord: LatticeCoord = [0, 0, 0];
-          coord[axis] = index;
-          coord[a] = u;
-          coord[b] = v;
+
+    for (let i = ranges[0].lo; i <= ranges[0].hi; i += snap) {
+      for (let j = ranges[1].lo; j <= ranges[1].hi; j += snap) {
+        for (let k = ranges[2].lo; k <= ranges[2].hi; k += snap) {
+          const coord: LatticeCoord = [i, j, k];
           coords.push(coord);
-          target.push(coord[0] * unit, coord[1] * unit, coord[2] * unit);
+          const offPlane = Math.abs(coord[axis] - plane.index) / snap;
+          const target = offPlane < 0.5 ? active : offPlane <= NEIGHBOUR_PLANES ? near : far;
+          target.push(i * unit, j * unit, k * unit);
         }
       }
     }
+
     const build = (values: number[]) => {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(values, 3));
       return geometry;
     };
-    return { active: build(active), nearby: build(nearby), coords };
+    return { active: build(active), near: build(near), far: build(far), coords };
   }, [field, plane, snap, unit]);
 
   // -----------------------------------------------------------------------
@@ -380,7 +400,7 @@ export function LatticeSurface({
     };
 
     // Corners of the model, wherever they are — this is what lets a face span
-    // planes, and it is deliberately not limited to the visible slab.
+    // planes, and it is deliberately not limited to the drawn field.
     for (const v of handles) consider(coordOf(lattice, v), 0.6);
     for (const coord of dots.coords) consider(coord, 1);
 
@@ -715,22 +735,22 @@ export function LatticeSurface({
 
   const rgb = new THREE.Color(color?.[0] ?? 0.55, color?.[1] ?? 0.68, color?.[2] ?? 0.85);
 
-  /** The catcher: big enough to cover the dot field, and nothing else. */
+  /**
+   * What catches rays that hit nothing else.
+   *
+   * A box around the field rather than a quad on the work plane, so the pointer
+   * still resolves when the plane is edge-on to the camera — and drawn BACK
+   * side only, which puts its surface behind everything in the model. A
+   * front-facing wall would sit between the camera and the cage and swallow
+   * every click meant for a face.
+   */
   const catcher = useMemo(() => {
     const { ranges } = field;
-    const width = (ranges[0].hi - ranges[0].lo + 4) * unit;
-    const height = (ranges[1].hi - ranges[1].lo + 4) * unit;
-    const centreU = ((ranges[0].hi + ranges[0].lo) / 2) * unit;
-    const centreV = ((ranges[1].hi + ranges[1].lo) / 2) * unit;
-    const value = plane.index * unit;
-    const position: [number, number, number] = [0, 0, 0];
-    position[AXIS_INDEX[plane.axis]] = value;
-    position[field.a] = centreU;
-    position[field.b] = centreV;
-    const rotation: [number, number, number] =
-      plane.axis === 'z' ? [0, 0, 0] : plane.axis === 'x' ? [0, Math.PI / 2, 0] : [Math.PI / 2, 0, 0];
-    return { width, height, position, rotation };
-  }, [field, plane, unit]);
+    const pad = 2 * snap;
+    const size = ranges.map((r) => (r.hi - r.lo + 2 * pad) * unit) as unknown as [number, number, number];
+    const position = ranges.map((r) => ((r.hi + r.lo) / 2) * unit) as unknown as [number, number, number];
+    return { size, position };
+  }, [field, snap, unit]);
 
   const pendingLine = useMemo(() => {
     const points = [...pending];
@@ -796,18 +816,25 @@ export function LatticeSurface({
         <meshBasicMaterial color="#0ea5e9" depthTest={false} />
       </instancedMesh>
 
-      {/* The grid. Only the active slab, which is what makes a field of a
-          hundred thousand points cost a few thousand. */}
-      <points geometry={dots.nearby} raycast={() => null}>
+      {/* The grid, as a volume. The whole cube is drawn and the whole cube is
+          clickable; the work plane is picked out inside it rather than being
+          the only thing that exists. */}
+      <points geometry={dots.far} raycast={() => null}>
+        <pointsMaterial
+          map={dotTexture} color="#94a3b8" size={step * 0.16} sizeAttenuation
+          transparent opacity={0.16} depthWrite={false}
+        />
+      </points>
+      <points geometry={dots.near} raycast={() => null}>
         <pointsMaterial
           map={dotTexture} color="#94a3b8" size={step * 0.22} sizeAttenuation
-          transparent opacity={0.18} depthWrite={false}
+          transparent opacity={0.4} depthWrite={false}
         />
       </points>
       <points geometry={dots.active} raycast={() => null}>
         <pointsMaterial
-          map={dotTexture} color="#64748b" size={step * 0.32} sizeAttenuation
-          transparent opacity={0.85} depthWrite={false}
+          map={dotTexture} color="#475569" size={step * 0.34} sizeAttenuation
+          transparent opacity={0.95} depthWrite={false}
         />
       </points>
 
@@ -827,14 +854,13 @@ export function LatticeSurface({
 
       <mesh
         position={catcher.position}
-        rotation={catcher.rotation}
         onPointerMove={onPlaneMove}
         onPointerDown={onPlaneDown}
         onPointerUp={endDrag}
         onPointerLeave={() => { setHover(null); endDrag(); }}
       >
-        <planeGeometry args={[catcher.width, catcher.height]} />
-        <meshBasicMaterial colorWrite={false} depthWrite={false} side={THREE.DoubleSide} />
+        <boxGeometry args={catcher.size} />
+        <meshBasicMaterial colorWrite={false} depthWrite={false} side={THREE.BackSide} />
       </mesh>
     </group>
   );
