@@ -21,7 +21,6 @@ import { MATERIALS, describeSpeedRecommendation, recommendSpeeds } from '../util
 import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { FdmNotice } from './FdmNotice';
 import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 
@@ -1093,10 +1092,6 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
    */
   const storeMaterial = useStore((s) => s.material);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
-  // A relief is a routing operation whatever the bench is set to; what the
-  // setting changes is whether the machine section is the right answer for
-  // the person reading it. See `FdmNotice`.
-  const isFdm = useStore((s) => s.machineTarget) === 'fdm';
 
   // Folded in during render rather than from an effect, so no frame is ever
   // drawn with feeds derived for the material that was selected a moment ago.
@@ -1130,14 +1125,6 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
       else next[key] = value;
       return next;
     });
-  const _override = <K extends keyof ReliefOverrides>(key: K, value: number | null) =>
-    setOverrides((prev) => {
-      const next = { ...prev };
-      if (value === null) delete next[key];
-      else next[key] = value;
-      return next;
-    });
-  void _override;
 
   const [probeCols, setProbeCols] = useState(3);
   const [probeRows, setProbeRows] = useState(3);
@@ -2114,7 +2101,6 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               bar. What is left here is what cannot be answered without the
               job: which cutters it wants, and whether its outline lands on the
               stock. */}
-          {isFdm && <FdmNotice />}
 
           <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-white space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">

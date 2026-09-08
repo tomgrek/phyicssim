@@ -8,7 +8,6 @@ import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcode
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { FdmNotice } from './FdmNotice';
 import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
@@ -181,11 +180,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
    *
    * The G-code is still written for whatever would cut it, so FDM reads as a
    * router here — depth passes, a spindle, corner relief. What changes is that
-   * the machine section is not the answer for this operator, and `FdmNotice`
-   * says so rather than letting them look for a Start button.
+   * the machine section is not the answer for this operator — which is said
+   * where the machine is chosen, not here.
    */
   const machineTarget = useStore((s) => s.machineTarget);
-  const isFdm = machineTarget === 'fdm';
   const machineMode = machineTarget === 'laser' ? 'laser' : 'cnc';
   const material = useStore((s) => s.material);
   const materialLabel = MATERIALS.find((m) => m.id === material)?.label ?? material;
@@ -833,7 +831,6 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               machine rather than this job, and were repeated identically in
               every export modal. What stays is job-specific: the cutter, where
               the outline falls, and starting it. */}
-          {isFdm && <FdmNotice />}
 
           <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-white space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -890,7 +887,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   className="py-1.5 px-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1 cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Frame Laser</span>
+                  <span>{machineMode === 'laser' ? 'Frame Laser' : 'Frame Job'}</span>
                 </button>
                 <div className="ml-auto">
                   <JobTransport
