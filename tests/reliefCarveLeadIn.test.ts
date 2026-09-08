@@ -72,6 +72,58 @@ describe('entering the cut after a roughing pass', () => {
     expect(Math.min(...approaches)).toBeLessThan(-5);
   });
 
+  /*
+   * The traverse height is the one thing here that can wreck a workpiece.
+   *
+   * Passes no longer retract to `safeZ` between them — they lift only as far as
+   * it takes to clear what stands on the way to the next pass, which on a
+   * raster of closely spaced lines is a millimetre rather than the full retract
+   * height. That is worth several metres of Z rapid a job, and it is only safe
+   * if the clearance is measured against the material rather than assumed from
+   * how close the next pass happens to be.
+   */
+  it('never flies a rapid through material it has not cut yet', () => {
+    const r = generateReliefCarveGcode(dome, BASE);
+    expect(r.success).toBe(true);
+
+    // Everything the program is known to cut, as a point cloud. A rapid that
+    // passes over any of these lower than the point itself is a collision.
+    const solid = r.segments.flatMap((s) => s.points);
+    expect(solid.length).toBeGreaterThan(100);
+
+    let x = 0, y = 0, z = BASE.safeZ;
+    let rapids = 0;
+    for (const line of r.gcode.split('\n')) {
+      const mx = /X(-?[\d.]+)/.exec(line);
+      const my = /Y(-?[\d.]+)/.exec(line);
+      const mz = /Z(-?[\d.]+)/.exec(line);
+      if (!line.startsWith('G0') && !line.startsWith('G1')) continue;
+
+      const nx = mx ? parseFloat(mx[1]) : x;
+      const ny = my ? parseFloat(my[1]) : y;
+      const nz = mz ? parseFloat(mz[1]) : z;
+
+      // Only rapid moves that travel in XY are a hazard; a plunge is meant to
+      // go into the work, and a cutting move is doing its job.
+      if (line.startsWith('G0') && (mx || my)) {
+        rapids++;
+        const len = Math.hypot(nx - x, ny - y);
+        for (const p of solid) {
+          // Distance from the point to the traverse segment, in plan.
+          const t = len < 1e-9 ? 0
+            : Math.max(0, Math.min(1, ((p.x - x) * (nx - x) + (p.y - y) * (ny - y)) / (len * len)));
+          const dx = p.x - (x + (nx - x) * t);
+          const dy = p.y - (y + (ny - y) * t);
+          if (dx * dx + dy * dy > 0.25) continue; // not under the tool's line
+          // The move happens at the lower of its ends' heights.
+          expect(p.z).toBeLessThanOrEqual(Math.min(z, nz) + 1e-3);
+        }
+      }
+      x = nx; y = ny; z = nz;
+    }
+    expect(rapids).toBeGreaterThan(10);
+  });
+
   it('still reaches the full depth of the relief', () => {
     const r = generateReliefCarveGcode(dome, BASE);
     const deepest = Math.min(...cutZs(r.gcode));

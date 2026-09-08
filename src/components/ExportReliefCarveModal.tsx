@@ -259,10 +259,22 @@ function buildPreviewPath(
     const head = seg.points[0];
 
     if (at) {
-      // Up, across, down — the retract the exporter writes between passes.
-      raw.push({ x1: at.x, y1: at.y, z1: at.z, x2: at.x, y2: at.y, z2: options.safeZ, feed: RAPID_MM_MIN, rapid: true });
-      raw.push({ x1: at.x, y1: at.y, z1: options.safeZ, x2: head.x, y2: head.y, z2: options.safeZ, feed: RAPID_MM_MIN, rapid: true });
-      raw.push({ x1: head.x, y1: head.y, z1: options.safeZ, x2: head.x, y2: head.y, z2: head.z, feed: Math.max(1, options.finishingPlungeRate), rapid: false });
+      /*
+       * Up, across, down — the retract the exporter writes between passes.
+       *
+       * At the height the exporter actually chose, not at `safeZ`. It clears
+       * only what stands between the two passes now, which on a raster of
+       * closely spaced lines is a fraction of the full retract — and an
+       * estimate still modelling the old round trip would quote a job hours
+       * longer than the one about to run.
+       */
+      const hop = seg.traverseZ ?? options.safeZ;
+      // Never below where the tool already is: the exporter does not descend
+      // to traverse, it only lifts if it has to.
+      const over = Math.max(hop, at.z);
+      raw.push({ x1: at.x, y1: at.y, z1: at.z, x2: at.x, y2: at.y, z2: over, feed: RAPID_MM_MIN, rapid: true });
+      raw.push({ x1: at.x, y1: at.y, z1: over, x2: head.x, y2: head.y, z2: over, feed: RAPID_MM_MIN, rapid: true });
+      raw.push({ x1: head.x, y1: head.y, z1: over, x2: head.x, y2: head.y, z2: head.z, feed: Math.max(1, options.finishingPlungeRate), rapid: false });
     }
 
     for (let i = 0; i + 1 < seg.points.length; i++) {

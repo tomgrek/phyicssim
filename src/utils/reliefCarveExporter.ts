@@ -352,6 +352,15 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
 export interface ToolpathSegment {
   type: 'roughing' | 'finishing';
   points: { x: number; y: number; z: number }[];
+  /**
+   * The height the tool flew at to reach this pass.
+   *
+   * Written by the exporter because the preview cannot work it out: it is not
+   * `safeZ` any more but a clearance plane over whatever actually stands
+   * between the previous pass and this one, and the preview's run-time estimate
+   * is only honest if it models the same hop the machine will make.
+   */
+  traverseZ?: number;
 }
 
 export interface ReliefCarveResult {
@@ -1554,6 +1563,11 @@ export function generateReliefCarveGcode(
     atX = x; atY = y; atZ = z;
   };
 
+  /** How far over the highest thing in the way a traverse flies, in mm. */
+  const TRAVERSE_CLEARANCE_MM = 1.0;
+  /** The height the last `leadIn` traversed at, recorded for the preview. */
+  let lastTraverseZ = opts.safeZ;
+
   const leadInTan = Math.tan(
     (Math.max(0, Math.min(89, opts.leadInAngleDeg)) * Math.PI) / 180
   );
@@ -1578,12 +1592,53 @@ export function generateReliefCarveGcode(
    * stock's top face on the first layer, the level the previous layer left on
    * every one after it.
    */
-  const leadIn = (path: PathPoint[], entryZ: number, rate: number, returnRate = 0) => {
+  const leadIn = (
+    path: PathPoint[],
+    entryZ: number,
+    rate: number,
+    returnRate = 0,
+    levelAt: (x: number, y: number) => number = () => entryZ
+  ) => {
     const head = path[0];
     const approachZ = Math.min(opts.safeZ, entryZ + 0.5);
-    rapidTo(head.x, head.y, approachZ);
+
+    /*
+     * Up only as far as it takes to clear what is in the way.
+     *
+     * Every pass used to end with a full retract to `safeZ` and every one
+     * began by flying back down — a round trip of the whole retract height
+     * between two raster lines a fraction of a millimetre apart. On a typical
+     * relief that is some four hundred retracts and several metres of Z rapid
+     * that cut nothing.
+     *
+     * The height is measured rather than guessed: the material level is
+     * sampled along the line the tool is about to fly, and the traverse goes a
+     * millimetre over the highest thing on it. That is exact where a rule like
+     * "stay low if the next pass is close" is only usually right — a wall
+     * standing between two adjacent passes is precisely the case such a rule
+     * gets wrong, and the cost of being wrong is the cutter driven through it
+     * at rapid.
+     */
+    const span = Math.hypot(head.x - atX, head.y - atY);
+    let highest = Math.max(levelAt(atX, atY), levelAt(head.x, head.y));
+    const steps = Math.min(64, Math.max(1, Math.ceil(span / 1.0)));
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      highest = Math.max(highest, levelAt(atX + (head.x - atX) * t, atY + (head.y - atY) * t));
+    }
+    const traverseZ = Math.min(opts.safeZ, Math.min(0, highest) + TRAVERSE_CLEARANCE_MM);
+
+    if (traverseZ > atZ + 1e-6) {
+      gcode.push(`G0 Z${f(traverseZ)}`);
+      atZ = traverseZ;
+    }
     gcode.push(`G0 X${f(head.x)} Y${f(head.y)}`);
-    if (approachZ < opts.safeZ - 1e-6) gcode.push(`G0 Z${f(approachZ)}`);
+    rapidTo(head.x, head.y, atZ);
+    if (approachZ < atZ - 1e-6) {
+      gcode.push(`G0 Z${f(approachZ)}`);
+      atZ = approachZ;
+    }
+    lastTraverseZ = traverseZ;
 
     const plunge = () => {
       plungeTo(head.z);
@@ -1881,10 +1936,10 @@ export function generateReliefCarveGcode(
           cutTo(path[0].x, path[0].y, layerZ);
           gcode.push(`G1 X${f(path[0].x)} Y${f(path[0].y)} F${Math.round(feed)}`);
 
-          gcode.push(`G0 Z${f(opts.safeZ)}`);
-          atZ = opts.safeZ;
-
-          segments.push({ type: 'roughing', points: path });
+          // No retract here: the next `leadIn` lifts only as far as it needs
+          // to clear what stands between this ring and the one inside it, and
+          // the final retract at the end of the program covers the last one.
+          segments.push({ type: 'roughing', points: path, traverseZ: lastTraverseZ });
         }
       }
     };
@@ -1918,12 +1973,14 @@ export function generateReliefCarveGcode(
 
             cutTo(last.x, last.y, layerZ);
             gcode.push(`G1 X${f(last.x)} Y${f(last.y)} F${Math.round(opts.roughingFeedrate)}`);
-            gcode.push(`G0 Z${f(opts.safeZ)}`);
-            atZ = opts.safeZ;
 
             // One segment per run: the preview must not draw a line across the
-            // gap the tool actually flew over at safe height.
-            segments.push({ type: 'roughing', points: [run[0], run[run.length - 1]] });
+            // gap the tool actually flew over.
+            segments.push({
+              type: 'roughing',
+              points: [run[0], run[run.length - 1]],
+              traverseZ: lastTraverseZ,
+            });
           }
           run = [];
         };
@@ -2133,7 +2190,9 @@ export function generateReliefCarveGcode(
          */
         const head = pass[0];
         const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
-        leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
+        // The traverse is measured against what roughing left standing, which
+        // is the highest the material can be anywhere the finisher flies.
+        leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate, materialLevelAt);
 
         // GRBL keeps the last feedrate, so it is only stated when it changes.
         let first = true;
@@ -2146,9 +2205,7 @@ export function generateReliefCarveGcode(
           first = false;
         }
 
-        gcode.push(`G0 Z${f(opts.safeZ)}`);
-        atZ = opts.safeZ;
-        segments.push({ type: 'finishing', points: pass });
+        segments.push({ type: 'finishing', points: pass, traverseZ: lastTraverseZ });
       }
     }
 
