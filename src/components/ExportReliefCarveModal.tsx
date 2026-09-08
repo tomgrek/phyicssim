@@ -483,6 +483,12 @@ function ToolpathView({
   /** Set by the geometry effect, read by the frame loop. */
   const cutRef = useRef<THREE.LineSegments | null>(null);
   const toolRef = useRef<THREE.Object3D | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  /** Set once the operator orbits, pans or zooms; stops the auto-fit taking over. */
+  const userMovedRef = useRef(false);
+  /** Lets the mount effect's `resize` reach the fit without depending on it. */
+  const fitRef = useRef<(() => void) | null>(null);
 
   const path = useMemo(() => buildPreviewPath(result, options), [result, options]);
 
@@ -543,7 +549,11 @@ function ToolpathView({
 
     const camera = new THREE.PerspectiveCamera(45, 1, 1, 4000);
     camera.up.set(0, 0, 1);
+    // A starting direction only. The distance is set by `fitView` once there is
+    // geometry to frame — this pose on its own suits a 150 mm stock and nothing
+    // else, which is what "the preview is not zoomed to fit" amounted to.
     camera.position.set(160, -200, 190);
+    cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -578,10 +588,17 @@ function ToolpathView({
       MIDDLE: THREE.MOUSE.PAN,
       RIGHT: THREE.MOUSE.ROTATE,
     };
+    controlsRef.current = controls;
 
     const group = new THREE.Group();
     contentRef.current = group;
     scene.add(group);
+
+    // Any deliberate orbit, pan or zoom means the framing is the operator's
+    // now, and re-fitting under them would be the viewport snatching the view
+    // back every time a setting changed.
+    const onUserMove = () => { userMovedRef.current = true; };
+    controls.addEventListener('start', onUserMove);
 
     const resize = () => {
       const w = mount.clientWidth || 600;
@@ -589,6 +606,9 @@ function ToolpathView({
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      // A narrower viewport needs the camera further back for the same content,
+      // so the fit is aspect-dependent and has to be redone on a resize.
+      if (!userMovedRef.current) fitRef.current?.();
     };
     resize();
     const observer = new ResizeObserver(resize);
@@ -605,6 +625,7 @@ function ToolpathView({
     return () => {
       cancelAnimationFrame(raf);
       observer.disconnect();
+      controls.removeEventListener('start', onUserMove);
       controls.dispose();
       scene.traverse((o) => {
         const m = o as THREE.Mesh;
@@ -619,6 +640,8 @@ function ToolpathView({
       sceneRef.current = null;
       cutRef.current = null;
       toolRef.current = null;
+      cameraRef.current = null;
+      controlsRef.current = null;
     };
   }, []);
 
@@ -748,6 +771,77 @@ function ToolpathView({
     colourMode,
     deepest,
   ]);
+
+  /**
+   * Frames the stock and the toolpath, whatever size they are.
+   *
+   * The camera used to be posed once, by hand, in the mount effect: 45° of
+   * vertical FOV at ~320 mm out, which frames about 265 mm. That happens to
+   * suit the 150 mm default stock and is wrong for everything else — a
+   * 50 x 40 mm carve was a speck in the middle of the viewport, and a 400 mm
+   * one ran off the edges. Nothing recomputed it when the stock changed size,
+   * and `controls.target` was never set at all, so the orbit centre stayed at
+   * the world origin while the content sat below it.
+   *
+   * Both axes are checked. Fitting the vertical FOV alone is not enough in a
+   * wide viewport, where the horizontal angle is the wider one and a
+   * non-square stock overflows sideways while comfortably fitting top to
+   * bottom; the distance taken is whichever of the two demands more room.
+   */
+  const fitView = useCallback(() => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+
+    const w = options.stockWidthMm;
+    const d = options.stockDepthMm;
+    const t = options.stockThicknessMm;
+
+    // The group is slid back by half the stock, so work coordinates land in the
+    // viewport with the block straddling the origin in X and Y.
+    const box = new THREE.Box3(
+      new THREE.Vector3(-w / 2, -d / 2, -t),
+      new THREE.Vector3(w / 2, d / 2, 0)
+    );
+    // Union with the cut itself, so a toolpath that reaches past the stock — or
+    // deeper than it — is still framed rather than cropped.
+    const cb = result.carveBounds;
+    if (cb) {
+      box.expandByPoint(new THREE.Vector3(cb.minX - w / 2, cb.minY - d / 2, deepest));
+      box.expandByPoint(new THREE.Vector3(cb.maxX - w / 2, cb.maxY - d / 2, 0));
+    }
+    if (box.isEmpty()) return;
+
+    const centre = box.getCenter(new THREE.Vector3());
+    const radius = Math.max(1, box.getBoundingSphere(new THREE.Sphere()).radius);
+
+    const vFov = THREE.MathUtils.degToRad(camera.fov);
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(0.0001, camera.aspect));
+    const dist = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * 1.15;
+
+    // Keep whatever direction the camera is looking from, so a re-fit after a
+    // settings change does not also spin the view back to the default corner.
+    const dir = camera.position.clone().sub(controls.target);
+    if (dir.lengthSq() < 1e-6) dir.set(160, -200, 190);
+    dir.normalize();
+
+    controls.target.copy(centre);
+    camera.position.copy(centre).addScaledVector(dir, dist);
+    camera.near = Math.max(0.1, dist / 1000);
+    camera.far = dist * 10;
+    camera.updateProjectionMatrix();
+    controls.update();
+  }, [options.stockWidthMm, options.stockDepthMm, options.stockThicknessMm, result.carveBounds, deepest]);
+
+  useEffect(() => { fitRef.current = fitView; }, [fitView]);
+
+  // A new path or a new stock size is a new thing to frame, and the operator's
+  // own framing was for the old one — so the manual-override flag is cleared
+  // and the view re-fitted.
+  useEffect(() => {
+    userMovedRef.current = false;
+    fitView();
+  }, [fitView, path]);
 
   // A new carve is a new path, so the playhead goes back to the start rather
   // than sitting at a time the new job may not even have. Done during render
