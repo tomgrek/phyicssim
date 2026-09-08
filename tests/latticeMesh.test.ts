@@ -2,10 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   createLattice, vertexAt, findVertex, addFace, findFace, removeFace, flipFace,
   moveVertex, removeVertex, faceNormal, dominantAxis, extrudeFace, mirrorFace,
-  isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges,
+  isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges, coordOf,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
   boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, type Lattice,
 } from '../src/utils/latticeMesh';
+import { meshCentroid } from '../src/utils/latticeMesh';
 import { subdivide } from '../src/utils/subdivide';
 
 /** The unit cube as six outward-wound quads, corners on 0/1 in each axis. */
@@ -325,5 +326,57 @@ describe('the grid steps', () => {
     const coarse = vertexAt(l, 1000, 0, 0);   // one 100 mm step out
     const fine = vertexAt(l, 1000, 0, 0);     // the same point, reached finely
     expect(fine).toBe(coarse);
+  });
+});
+
+describe('centring on the centre of mass', () => {
+  /** The starting box, moved bodily off the origin. */
+  function offsetCube(): Lattice {
+    const l = boxLattice(0.01, 2); // corners at +/-2 steps
+    for (let v = 0; v < l.coords.length / 3; v++) {
+      const [i, j, k] = coordOf(l, v);
+      moveVertex(l, v, i + 10, j + 4, k);
+    }
+    return l;
+  }
+
+  it('finds the volume centroid of a closed solid', () => {
+    const l = offsetCube();
+    const centre = meshCentroid(toPolyMesh(l));
+    expect(centre[0]).toBeCloseTo(0.1, 6);   // 10 steps of 0.01 m
+    expect(centre[1]).toBeCloseTo(0.04, 6);
+    expect(centre[2]).toBeCloseTo(0, 6);
+  });
+
+  it('falls back to the corner average when there is no volume', () => {
+    const l = createLattice(0.01);
+    const a = vertexAt(l, 0, 0, 0), b = vertexAt(l, 2, 0, 0), c = vertexAt(l, 2, 2, 0), d = vertexAt(l, 0, 2, 0);
+    addFace(l, [a, b, c, d]);
+    const centre = meshCentroid(toPolyMesh(l));
+    expect(centre[0]).toBeCloseTo(0.01, 6);
+    expect(centre[1]).toBeCloseTo(0.01, 6);
+  });
+
+  it('hands back a mesh centred on the body origin, and says how far it moved', () => {
+    const geom = toSceneGeom(offsetCube());
+    expect(geom.origin[0]).toBeCloseTo(0.1, 6);
+    expect(geom.origin[1]).toBeCloseTo(0.04, 6);
+    // MuJoCo moves a mesh onto its own centre of mass whatever we do, so what
+    // is handed over has to be centred already or the body spins about a point
+    // outside the shape.
+    const centred = meshCentroid({
+      positions: geom.renderVertices,
+      faces: Array.from({ length: geom.faces.length / 3 }, (_, t) => geom.faces.slice(t * 3, t * 3 + 3)),
+    });
+    for (const c of centred) expect(Math.abs(c)).toBeLessThan(1e-9);
+  });
+
+  it('does not change the shape, only where it sits', () => {
+    const moved = toSceneGeom(offsetCube());
+    const home = toSceneGeom(boxLattice(0.01, 2));
+    expect(moved.renderVertices.length).toBe(home.renderVertices.length);
+    for (let i = 0; i < home.renderVertices.length; i++) {
+      expect(moved.renderVertices[i]).toBeCloseTo(home.renderVertices[i], 9);
+    }
   });
 });

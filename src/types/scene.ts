@@ -180,6 +180,14 @@ export interface SceneNode {
   latticeCage?: { unit: number; coords: number[]; faces: number[]; faceSizes: number[] };
   /** How many Catmull-Clark passes the mesh geom was built with (0, 1 or 2). */
   latticeSubdiv?: number;
+  /**
+   * How far the mesh geom was shifted to put its centre of mass on the body
+   * origin, in the body's own axes. Bodies rotate about their origin and MuJoCo
+   * moves a mesh asset onto its own centre of mass, so a shape built off to one
+   * side has to be recentred and the body moved to compensate; this is what was
+   * compensated for last time, so the next commit can apply the difference.
+   */
+  latticeOrigin?: number[];
   /** Bumped when the cage is replaced wholesale, to remount the editor on it. */
   latticeVersion?: number;
   /** Set once a face has been drawn, so a reset can warn before discarding it. */

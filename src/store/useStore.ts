@@ -1074,9 +1074,48 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       for (const node of nodes) {
         if (node.id === nodeId) {
           const level = subdiv ?? node.latticeSubdiv ?? 0;
-          const { vertices, renderVertices, faces } = latticeToSceneGeom(deserializeCage(cage), level);
+          const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(deserializeCage(cage), level);
           const geom = node.geoms?.find((g: any) => g.type === 'mesh') ?? node.geoms?.[0];
           if (geom) Object.assign(geom, { vertices, renderVertices, faces });
+
+          /*
+            The mesh comes back centred on its own centre of mass, so the body
+            spins about the shape rather than swinging it around a point off to
+            one side — see latticeMesh.toSceneGeom. The body then has to move by
+            however much the shape moved, or extruding away from the origin
+            would drag the whole thing across the scene.
+
+            The offset is in the body's own axes, so it is rotated into world
+            space by the body's own orientation before it is added to a world
+            position. Only the CHANGE is applied: the offset already baked into
+            the mesh is remembered on the node, because every commit recomputes
+            it from scratch.
+          */
+          const previous = node.latticeOrigin ?? [0, 0, 0];
+          const delta = new THREE.Vector3(
+            origin[0] - previous[0],
+            origin[1] - previous[1],
+            origin[2] - previous[2],
+          );
+          if (delta.lengthSq() > 0) {
+            if (node.quat) {
+              delta.applyQuaternion(new THREE.Quaternion(node.quat[1], node.quat[2], node.quat[3], node.quat[0]));
+            } else if (node.euler) {
+              const rad = (d: number) => (d * Math.PI) / 180;
+              delta.applyEuler(new THREE.Euler(rad(node.euler[0]), rad(node.euler[1]), rad(node.euler[2]), 'XYZ'));
+            }
+            node.pos = [
+              (node.pos?.[0] ?? 0) + delta.x,
+              (node.pos?.[1] ?? 0) + delta.y,
+              (node.pos?.[2] ?? 0) + delta.z,
+            ];
+            // basePos is what the rotation code rewinds to; leaving it behind
+            // would teleport the body back to where the shape used to be the
+            // next time somebody turned a rotation slider.
+            if (node.basePos) node.basePos = [...node.pos];
+          }
+
+          node.latticeOrigin = origin;
           node.latticeCage = cage;
           node.latticeSubdiv = level;
           node.latticeEdited = true;
@@ -2170,6 +2209,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         // out. See utils/latticeMesh.ts.
         const cage = serializeCage(boxLattice(LATTICE_UNIT, 200));
         const { vertices, renderVertices, faces } = latticeToSceneGeom(deserializeCage(cage), 0);
+        // Centred on the origin already, so the offset it starts with is zero —
+        // but it is written down rather than assumed, because applyLattice
+        // applies the CHANGE in offset and needs somewhere to start from.
         geoms = [{
           name: `${id}_mesh`,
           type: 'mesh',
@@ -2273,6 +2315,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         latticeCage: serializeCage(boxLattice(LATTICE_UNIT, 200)),
         latticeSubdiv: 0,
         latticeVersion: 1,
+        latticeOrigin: [0, 0, 0],
       } : {}),
       ...(type === 'curve' ? {
         isCurve: true,

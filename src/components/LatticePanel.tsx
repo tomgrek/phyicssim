@@ -133,12 +133,14 @@ export function LatticePanel() {
 
       {/* The work plane. Not a constraint on what may be joined to what —
           anything already drawn is clickable wherever it sits — but the answer
-          to how deep a point that does not exist yet should be born. Worth
-          keeping on screen because a plane three steps behind where you think
-          it is looks perfectly reasonable from the front. */}
+          to how deep a point that does not exist YET should be born. Worth
+          keeping on screen because a plane three steps behind where you think it
+          is looks perfectly reasonable from the front. The lit slice in the
+          viewport follows the pointer rather than this, and clicking at a depth
+          brings this with it. */}
       <div className="space-y-1.5">
         <div className="flex items-baseline justify-between">
-          <span className={labelClass}>Work Plane</span>
+          <span className={labelClass} title="Where a NEW point lands when you click empty space. Points that already exist can be clicked wherever they are, at any depth.">New Points At</span>
           <span className="text-[10px] font-mono text-slate-600 dark:text-slate-300">
             {plane.axis} = {formatStep(plane.index * unitMm)}
           </span>
@@ -161,9 +163,9 @@ export function LatticePanel() {
           ))}
         </div>
         <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
-          <kbd className="font-mono">[</kbd> / <kbd className="font-mono">]</kbd> moves it a step, Shift for five.
-          Only new points in empty space land on it — any point already drawn can be
-          clicked wherever it is.
+          The lit slice of dots follows your pointer; clicking at a depth sets this to it.
+          <kbd className="font-mono"> [</kbd> / <kbd className="font-mono">]</kbd> moves it a step, Shift for five.
+          Points that already exist can be clicked at any depth.
         </p>
       </div>
 

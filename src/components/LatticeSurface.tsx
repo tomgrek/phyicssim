@@ -40,9 +40,6 @@ import {
   AXIS_INDEX, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
 } from '../utils/latticeMesh';
 
-/** How many planes either side of the active one are drawn at full legibility. */
-const NEIGHBOUR_PLANES = 2;
-
 /** Steps of empty grid drawn around whatever has been built so far. */
 const FIELD_MARGIN = 6;
 
@@ -94,6 +91,8 @@ export function LatticeSurface({
   nodeId, geomName, color, mujoco, model, data, cage, subdiv,
 }: LatticeSurfaceProps) {
   const groupRef = useRef<THREE.Group>(null);
+  /** The group everything in raw lattice coordinates hangs off. See `solid`. */
+  const cageRef = useRef<THREE.Group>(null);
 
   const tool = useStore((s) => s.latticeTool);
   const plane = useStore((s) => s.latticePlane);
@@ -219,14 +218,23 @@ export function LatticeSurface({
     return [i * unit, j * unit, k * unit];
   }, [lattice, unit]);
 
-  /** The shape as it will be exported: the cage, smoothed. */
+  /**
+   * The shape as it will be exported: the cage, smoothed, and centred on its own
+   * centre of mass exactly as the committed mesh geom is.
+   *
+   * `origin` is how far that centring moved it, and everything else drawn here
+   * — the cage, the grid, the cursor — lives in raw lattice space, so it all
+   * hangs off a group shifted by the same amount. Without that the cage would
+   * sit beside the surface it describes the moment a shape grew away from the
+   * body origin.
+   */
   const solid = useMemo(() => {
-    const { renderVertices, faces } = toSceneGeom(lattice, subdiv);
+    const { renderVertices, faces, origin } = toSceneGeom(lattice, subdiv);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(renderVertices, 3));
     geometry.setIndex(faces);
     geometry.computeVertexNormals();
-    return geometry;
+    return { geometry, origin };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lattice, revision, subdiv]);
 
@@ -324,40 +332,61 @@ export function LatticeSurface({
 
   const dotTexture = useMemo(() => makeDotTexture(), []);
 
-  const dots = useMemo(() => {
-    // Three depths of emphasis rather than one field at one opacity. A cube of
-    // dots at uniform brightness is a fog: you can see that there is a grid and
-    // not where anything is in it. The active plane is picked out, its
-    // neighbours are legible, and the rest of the volume is present enough to
-    // aim at and faint enough to see the model through.
-    const active: number[] = [];
-    const near: number[] = [];
-    const far: number[] = [];
+  /**
+   * The whole volume of dots, built once per field rather than per pointer move.
+   *
+   * Kept apart from the lit slice below so that following the pointer costs a
+   * few hundred points rebuilt, not fifteen thousand.
+   */
+  const volume = useMemo(() => {
+    const positions: number[] = [];
     // Every dot drawn is a dot that can be clicked, so the coordinates are kept
     // rather than thrown away with the buffer.
     const coords: LatticeCoord[] = [];
     const { ranges } = field;
-    const axis = AXIS_INDEX[plane.axis];
-
     for (let i = ranges[0].lo; i <= ranges[0].hi; i += snap) {
       for (let j = ranges[1].lo; j <= ranges[1].hi; j += snap) {
         for (let k = ranges[2].lo; k <= ranges[2].hi; k += snap) {
-          const coord: LatticeCoord = [i, j, k];
-          coords.push(coord);
-          const offPlane = Math.abs(coord[axis] - plane.index) / snap;
-          const target = offPlane < 0.5 ? active : offPlane <= NEIGHBOUR_PLANES ? near : far;
-          target.push(i * unit, j * unit, k * unit);
+          coords.push([i, j, k]);
+          positions.push(i * unit, j * unit, k * unit);
         }
       }
     }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    return { geometry, coords };
+  }, [field, snap, unit]);
 
-    const build = (values: number[]) => {
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(values, 3));
-      return geometry;
-    };
-    return { active: build(active), near: build(near), far: build(far), coords };
-  }, [field, plane, snap, unit]);
+  /**
+   * Which slice of the volume is lit.
+   *
+   * The slice the POINTER is on, not a fixed one: a highlighted plane that
+   * never moves is a plane nobody can explain — centre of what? — and this mode
+   * is about depth, so the one thing worth picking out of a cube of identical
+   * dots is the depth the cursor is currently at. It falls back to the work
+   * plane when the pointer is off the model, which is where a new point in
+   * empty space would be born.
+   */
+  const litIndex = hover ? hover[AXIS_INDEX[plane.axis]] : plane.index;
+
+  const slice = useMemo(() => {
+    const positions: number[] = [];
+    const { ranges } = field;
+    const axis = AXIS_INDEX[plane.axis];
+    const [a, b] = OTHER_AXES[plane.axis];
+    for (let u = ranges[a].lo; u <= ranges[a].hi; u += snap) {
+      for (let v = ranges[b].lo; v <= ranges[b].hi; v += snap) {
+        const coord: LatticeCoord = [0, 0, 0];
+        coord[axis] = litIndex;
+        coord[a] = u;
+        coord[b] = v;
+        positions.push(coord[0] * unit, coord[1] * unit, coord[2] * unit);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    return geometry;
+  }, [field, litIndex, plane.axis, snap, unit]);
 
   // -----------------------------------------------------------------------
   // Pointer -> grid
@@ -365,7 +394,7 @@ export function LatticeSurface({
 
   /** The pointer ray in the body's own space, where the lattice lives. */
   const localRay = useCallback((event: ThreeEvent<PointerEvent>) => {
-    const group = groupRef.current;
+    const group = cageRef.current;
     if (!group) return null;
     const inverse = new THREE.Matrix4().copy(group.matrixWorld).invert();
     const origin = event.ray.origin.clone().applyMatrix4(inverse);
@@ -411,10 +440,10 @@ export function LatticeSurface({
     // Corners of the model, wherever they are — this is what lets a face span
     // planes, and it is deliberately not limited to the drawn field.
     for (const v of handles) consider(coordOf(lattice, v), 0.6);
-    for (const coord of dots.coords) consider(coord, 1);
+    for (const coord of volume.coords) consider(coord, 1);
 
     return best ? (best as { coord: LatticeCoord }).coord : null;
-  }, [dots.coords, handles, lattice, snap, unit]);
+  }, [handles, lattice, snap, unit, volume.coords]);
 
   /** Where the ray crosses the work plane, rounded to the nearest grid node. */
   const snapFromPlane = useCallback((ray: { origin: THREE.Vector3; direction: THREE.Vector3 }): LatticeCoord | null => {
@@ -491,7 +520,7 @@ export function LatticeSurface({
    * camera as squarely as it can.
    */
   const dragPlane = useCallback((axis: Axis, through: THREE.Vector3) => {
-    const group = groupRef.current!;
+    const group = cageRef.current!;
     const camera = getThree().camera;
     const inverse = new THREE.Matrix4().copy(group.matrixWorld).invert();
     const eye = camera.position.clone().applyMatrix4(inverse);
@@ -623,8 +652,13 @@ export function LatticeSurface({
     const coord = ray && resolve(ray);
     if (!coord) return;
     event.stopPropagation();
+    // Working at a depth moves the work plane there, so the next point placed in
+    // empty space appears beside the last one rather than back on whatever plane
+    // the session started on.
+    const axis = AXIS_INDEX[plane.axis];
+    if (coord[axis] !== plane.index) useStore.getState().setLatticePlane({ axis: plane.axis, index: coord[axis] });
     placeAt(coord);
-  }, [localRay, placeAt, resolve, tool]);
+  }, [localRay, placeAt, plane, resolve, tool]);
 
   const onFaceDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0 || event.faceIndex == null) return;
@@ -804,10 +838,11 @@ export function LatticeSurface({
   return (
     <group ref={groupRef} name={`${nodeId}_lattice`}>
       {/* The shape itself. */}
-      <mesh name={geomName} geometry={solid} castShadow receiveShadow raycast={() => null}>
+      <mesh name={geomName} geometry={solid.geometry} castShadow receiveShadow raycast={() => null}>
         <meshStandardMaterial color={rgb} roughness={0.6} metalness={0.05} side={THREE.DoubleSide} wireframe={wireframe} />
       </mesh>
 
+      <group ref={cageRef} position={[-solid.origin[0], -solid.origin[1], -solid.origin[2]]}>
       {/* The cage over it: the thing actually being edited. */}
       <lineSegments geometry={wire} raycast={() => null}>
         <lineBasicMaterial color="#0f172a" transparent opacity={0.55} depthTest={false} />
@@ -836,25 +871,18 @@ export function LatticeSurface({
         <meshBasicMaterial color="#0ea5e9" depthTest={false} />
       </instancedMesh>
 
-      {/* The grid, as a volume. The whole cube is drawn and the whole cube is
-          clickable; the work plane is picked out inside it rather than being
-          the only thing that exists. */}
-      <points geometry={dots.far} raycast={() => null}>
+      {/* The grid, as a volume: the whole cube is drawn and the whole cube is
+          clickable, with the slice under the pointer picked out of it. */}
+      <points geometry={volume.geometry} raycast={() => null}>
         <pointsMaterial
-          map={dotTexture} color="#94a3b8" size={step * 0.16} sizeAttenuation
-          transparent opacity={0.16} depthWrite={false}
+          map={dotTexture} color="#94a3b8" size={step * 0.18} sizeAttenuation
+          transparent opacity={0.22} depthWrite={false}
         />
       </points>
-      <points geometry={dots.near} raycast={() => null}>
-        <pointsMaterial
-          map={dotTexture} color="#94a3b8" size={step * 0.22} sizeAttenuation
-          transparent opacity={0.4} depthWrite={false}
-        />
-      </points>
-      <points geometry={dots.active} raycast={() => null}>
+      <points geometry={slice} raycast={() => null}>
         <pointsMaterial
           map={dotTexture} color="#475569" size={step * 0.34} sizeAttenuation
-          transparent opacity={0.95} depthWrite={false}
+          transparent opacity={0.9} depthWrite={false}
         />
       </points>
 
@@ -886,6 +914,7 @@ export function LatticeSurface({
         <boxGeometry args={catcher.size} />
         <meshBasicMaterial colorWrite={false} depthWrite={false} side={THREE.BackSide} />
       </mesh>
+      </group>
     </group>
   );
 }

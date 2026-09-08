@@ -589,27 +589,87 @@ function triangulate(faces: number[][]): number[] {
 }
 
 /**
- * The shape as a `SceneGeom` pair, optionally smoothed.
+ * Where the solid balances, in metres, in cage space.
+ *
+ * The VOLUME centroid, by the signed-tetrahedron sum, not the average of the
+ * corners — and the difference is not academic. MuJoCo translates every mesh
+ * asset so that its centre of mass sits at the mesh frame's origin, so a mesh
+ * handed over with its mass off to one side is silently moved, and then draws
+ * in one place while it collides in another and swings around a point outside
+ * itself when the body turns.
+ *
+ * An open surface has no volume to speak of, so the corner average stands in;
+ * it is not exactly what MuJoCo will do with such a mesh, but nothing is, and
+ * an open mesh is not a solid anybody can simulate anyway.
+ */
+export function meshCentroid(poly: PolyMesh): [number, number, number] {
+  const at = (v: number): [number, number, number] => [poly.positions[v * 3], poly.positions[v * 3 + 1], poly.positions[v * 3 + 2]];
+  let volume = 0;
+  let cx = 0, cy = 0, cz = 0;
+
+  for (const face of poly.faces) {
+    for (let i = 1; i + 1 < face.length; i++) {
+      const a = at(face[0]);
+      const b = at(face[i]);
+      const c = at(face[i + 1]);
+      // Six times the signed volume of the tetrahedron on the origin.
+      const v6 =
+        a[0] * (b[1] * c[2] - b[2] * c[1]) -
+        a[1] * (b[0] * c[2] - b[2] * c[0]) +
+        a[2] * (b[0] * c[1] - b[1] * c[0]);
+      volume += v6;
+      cx += (a[0] + b[0] + c[0]) * v6;
+      cy += (a[1] + b[1] + c[1]) * v6;
+      cz += (a[2] + b[2] + c[2]) * v6;
+    }
+  }
+
+  if (Math.abs(volume) > 1e-15) {
+    return [cx / (4 * volume), cy / (4 * volume), cz / (4 * volume)];
+  }
+
+  const count = poly.positions.length / 3;
+  if (count === 0) return [0, 0, 0];
+  let sx = 0, sy = 0, sz = 0;
+  for (let i = 0; i < count; i++) {
+    sx += poly.positions[i * 3];
+    sy += poly.positions[i * 3 + 1];
+    sz += poly.positions[i * 3 + 2];
+  }
+  return [sx / count, sy / count, sz / count];
+}
+
+/**
+ * The shape as a `SceneGeom` pair, optionally smoothed, centred on its own
+ * centre of mass.
  *
  * `subdivLevel` is applied HERE rather than kept as a display setting, because
  * everything downstream — the physics, the STL, the relief carve — has to see
  * the shape that was meant, not the blocky cage that produced it. The cage is
  * drawn separately as an overlay, and is preserved on the node so it can be
  * edited again (see `serializeCage`); it cannot be recovered from this.
+ *
+ * The centring is not cosmetic. A body's frame is where it spins and where
+ * MuJoCo expects the mesh's mass to be, so a shape built off to one side of the
+ * origin — which is exactly what happens when somebody extrudes away from where
+ * they started — would orbit its own origin when rotated instead of turning in
+ * place. `origin` is how far the shape was moved, so the caller can shift the
+ * body by the same amount and leave the shape where the person put it.
  */
 export function toSceneGeom(
   lattice: Lattice,
   subdivLevel = 0,
-): { vertices: number[]; renderVertices: number[]; faces: number[] } {
+): { vertices: number[]; renderVertices: number[]; faces: number[]; origin: [number, number, number] } {
   const poly = subdivLevel > 0 ? subdivide(toPolyMesh(lattice), subdivLevel) : toPolyMesh(lattice);
+  const origin = meshCentroid(poly);
 
   const count = poly.positions.length / 3;
   const renderVertices = new Array<number>(count * 3);
   const vertices = new Array<number>(count * 3);
   for (let i = 0; i < count; i++) {
-    const x = poly.positions[i * 3];
-    const y = poly.positions[i * 3 + 1];
-    const z = poly.positions[i * 3 + 2];
+    const x = poly.positions[i * 3] - origin[0];
+    const y = poly.positions[i * 3 + 1] - origin[1];
+    const z = poly.positions[i * 3 + 2] - origin[2];
     renderVertices[i * 3] = x;
     renderVertices[i * 3 + 1] = y;
     renderVertices[i * 3 + 2] = z;
@@ -620,7 +680,7 @@ export function toSceneGeom(
     vertices[i * 3 + 2] = -y;
   }
 
-  return { vertices, renderVertices, faces: triangulate(poly.faces) };
+  return { vertices, renderVertices, faces: triangulate(poly.faces), origin };
 }
 
 /** The cage's edges, as vertex index pairs, for drawing the wireframe. */
