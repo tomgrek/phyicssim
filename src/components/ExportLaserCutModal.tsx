@@ -953,6 +953,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     onStart={handleStartJob}
                     startLabel="Start Cut Job"
                     variant="inline"
+                    requiresZZero={machineMode === 'cnc'}
                   />
                 </div>
               </div>

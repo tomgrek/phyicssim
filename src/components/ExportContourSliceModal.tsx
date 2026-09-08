@@ -899,6 +899,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                     onStart={handleStartJob}
                     startLabel="Start Cut Job"
                     variant="inline"
+                    requiresZZero={machineMode === 'cnc'}
                   />
                 </div>
               </div>

@@ -265,7 +265,9 @@ export const JobTransport: React.FC<{
   startLabel: string;
   /** 'footer' is the big modal-footer treatment; 'inline' fits the machine panel. */
   variant?: 'footer' | 'inline';
-}> = ({ machineState, canStart, onStart, startLabel, variant = 'footer' }) => {
+  /** A laser has no Z datum, so an unconfirmed one can't hurt it — every CNC mode does. */
+  requiresZZero?: boolean;
+}> = ({ machineState, canStart, onStart, startLabel, variant = 'footer', requiresZZero = true }) => {
   const running = machineState.status === 'RUNNING';
   const paused = machineState.status.startsWith('PAUSED');
   const parked = machineState.status === 'PAUSED_PARKED';
@@ -285,11 +287,13 @@ export const JobTransport: React.FC<{
   const icon = variant === 'footer' ? 'w-4 h-4' : 'w-3.5 h-3.5';
 
   if (!running && !paused) {
+    const blockedByZZero = requiresZZero && machineState.needsZZero;
     return (
       <button
         onClick={onStart}
-        disabled={!canStart}
-        className={`${base} bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-slate-950`}
+        disabled={!canStart || blockedByZZero}
+        title={blockedByZZero ? 'Set Z zero in Machine Setup before running a job' : undefined}
+        className={`${base} bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950`}
       >
         <Play className={`${icon} fill-current`} />
         <span>{startLabel}</span>

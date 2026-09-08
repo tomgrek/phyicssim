@@ -332,7 +332,7 @@ export const MachineConfigModal: React.FC<{
               <JobOverrides machineState={machineState} />
               <MachineWorkOriginPanel
                 machineState={machineState}
-                showZProbe={machineTarget === 'cnc'}
+                showZProbe={machineTarget !== 'laser'}
                 isLaser={machineTarget === 'laser'}
                 onOpenDocs={onOpenDocs}
               />
