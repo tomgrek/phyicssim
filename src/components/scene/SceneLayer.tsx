@@ -16,6 +16,7 @@ import { useOrbitEnable } from './useOrbitEnable';
 import { CsgNegativeGhosts } from './CsgGhosts';
 import { PulleyRopesRenderer } from './PulleyRopes';
 import SculptSurface from '../SculptSurface';
+import LatticeSurface from '../LatticeSurface';
 import { PrintAnalysisOverlay } from '../PrintAnalysisOverlay';
 import { useCoarsePointer } from '../../hooks/useCoarsePointer';
 import { useVertexPaint } from '../../hooks/useVertexPaint';
@@ -983,6 +984,7 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
   // Subscribed rather than read once: entering and leaving the sculpt tools has
   // to swap which renderer draws the body.
   const sculptNodeId = useStore((state) => state.sculptNodeId);
+  const latticeNodeId = useStore((state) => state.latticeNodeId);
   // Static boxes are drawn as one InstancedMesh, which shares a single geometry
   // between every box in it — there is nowhere for one box's paint to live. So
   // they come out of the instancing while the brush is out, and stay out for
@@ -1029,8 +1031,13 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
   // Picking a different base replaces the mesh wholesale, so the sculpting
   // surface has to be remounted rather than left holding the old one.
   const sculptVersion = sculptNodeId ? (findSceneNode(sceneGraph?.nodes ?? [], sculptNodeId)?.sculptVersion ?? 1) : 1;
-  const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic && g !== sculptGeom);
-  const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic && g !== sculptGeom);
+  // The same arrangement for the lattice tools: they own the body they are on,
+  // and they draw the cage over it, which the ordinary renderer knows nothing
+  // about.
+  const latticeGeom = latticeNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === latticeNodeId) : undefined;
+  const latticeNode = latticeNodeId ? findSceneNode(sceneGraph?.nodes ?? [], latticeNodeId) : undefined;
+  const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic && g !== sculptGeom && g !== latticeGeom);
+  const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic && g !== sculptGeom && g !== latticeGeom);
 
   const implicitGeoms = useMemo(() => {
     if (!model || !mujoco || !model.geom_type) return [];
@@ -1127,6 +1134,19 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
             data={data}
             renderVertices={sculptGeom.renderVertices || []}
             faces={sculptGeom.faces || []}
+          />
+        )}
+        {latticeGeom && latticeNode?.latticeCage && (
+          <LatticeSurface
+            key={`${latticeGeom.nodeId}:${latticeNode.latticeVersion ?? 1}`}
+            nodeId={latticeGeom.nodeId}
+            geomName={latticeGeom.name}
+            color={latticeGeom.rgba || [0.55, 0.68, 0.85, 1]}
+            mujoco={mujoco}
+            model={model}
+            data={data}
+            cage={latticeNode.latticeCage}
+            subdiv={latticeNode.latticeSubdiv ?? 0}
           />
         )}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />

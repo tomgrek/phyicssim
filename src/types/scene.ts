@@ -166,6 +166,24 @@ export interface SceneNode {
   sculptVersion?: number;
   /** Set once a stroke has landed, so switching base can warn before discarding it. */
   sculptEdited?: boolean;
+
+  /**
+   * A lattice body: built by connecting points on a grid rather than by
+   * describing it or by brushing it. See utils/latticeMesh.ts.
+   *
+   * Its mesh geom holds the SUBDIVIDED result, which cannot be turned back into
+   * the cage that produced it — so `latticeCage` is the real document and the
+   * geom is output. Without the cage stored, a saved lattice would reopen as
+   * something that can be looked at and never edited again.
+   */
+  isLattice?: boolean;
+  latticeCage?: { unit: number; coords: number[]; faces: number[]; faceSizes: number[] };
+  /** How many Catmull-Clark passes the mesh geom was built with (0, 1 or 2). */
+  latticeSubdiv?: number;
+  /** Bumped when the cage is replaced wholesale, to remount the editor on it. */
+  latticeVersion?: number;
+  /** Set once a face has been drawn, so a reset can warn before discarding it. */
+  latticeEdited?: boolean;
   isComposite?: boolean;
   compositeType?: 'cable' | 'grid' | 'rope' | 'cloth';
   compositeCount?: string;

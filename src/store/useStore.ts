@@ -3,6 +3,11 @@ import * as THREE from 'three';
 import type { SceneGraph, SceneNode, CsgOp } from '../types/scene';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings } from '../utils/sculptMesh';
 import { buildSculptBase, DEFAULT_SCULPT_BASE, type SculptBaseId } from '../utils/sculptBases';
+import {
+  boxLattice, deserializeCage, serializeCage, toSceneGeom as latticeToSceneGeom,
+  DEFAULT_UNIT as LATTICE_UNIT, type Axis as LatticeAxis, type LatticeCage,
+  type SnapMultiple, type LatticeTool,
+} from '../utils/latticeMesh';
 import { type CsgResult, CSG_DEFAULT_SECTORS } from '../utils/csg';
 import type { PaintLayer } from '../utils/vertexPaint';
 import { compileToMJCF } from '../utils/mjcf';
@@ -553,7 +558,7 @@ export interface PhysicsState {
   updateNodeComposite: (id: string, params: Partial<any>) => void;
   
   setParentUnderSelected: (val: boolean) => void;
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt', position: number[]) => void;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice', position: number[]) => void;
 
   // --- Sculpting ----------------------------------------------------------
   /** The body being sculpted, or null when the sculpt tools are closed. */
@@ -567,6 +572,45 @@ export interface PhysicsState {
   setSculptStats: (stats: { vertices: number; faces: number; watertight: boolean; atBudget: boolean } | null) => void;
   /** Replaces a sculpt body's mesh with a different base shape, discarding the old one. */
   setSculptBase: (nodeId: string, base: SculptBaseId) => void;
+
+  // --- Lattice modelling ---------------------------------------------------
+  //
+  // The state here is the state of the TOOL, not of the shape: the shape lives
+  // on the node as `latticeCage`, because it has to survive being saved and the
+  // tool does not. See utils/latticeMesh.ts.
+  /** The body being modelled, or null when the lattice tools are closed. */
+  latticeNodeId: string | null;
+  latticeTool: LatticeTool;
+  /**
+   * The slice of the grid that clicks land on. Everything about placing a point
+   * in three dimensions with a two-dimensional pointer comes down to this: a
+   * ray hits infinitely many grid points, and exactly one plane.
+   */
+  latticePlane: { axis: LatticeAxis; index: number };
+  /** How many grid steps a click snaps to. Powers of two only — see SNAP_MULTIPLES. */
+  latticeSnap: SnapMultiple;
+  /** Mirror every placement across this axis through the body origin. */
+  latticeMirror: LatticeAxis | null;
+  /** What the panel shows: counts and whether the surface has closed. */
+  latticeStats: { vertices: number; faces: number; quads: number; tris: number; watertight: boolean } | null;
+  setLatticeNodeId: (id: string | null) => void;
+  setLatticeTool: (tool: LatticeTool) => void;
+  setLatticePlane: (plane: { axis: LatticeAxis; index: number }) => void;
+  /** Steps the work plane along its own axis. The keyboard's main job here. */
+  nudgeLatticePlane: (delta: number) => void;
+  setLatticeSnap: (snap: SnapMultiple) => void;
+  setLatticeMirror: (axis: LatticeAxis | null) => void;
+  setLatticeStats: (stats: { vertices: number; faces: number; quads: number; tris: number; watertight: boolean } | null) => void;
+  /**
+   * Writes a cage to a node and rebuilds its mesh from it, in one go.
+   *
+   * One action rather than a geom update followed by a node update, because
+   * those are two scene-graph writes and therefore two MuJoCo recompiles for
+   * what is one edit.
+   */
+  applyLattice: (nodeId: string, cage: LatticeCage, subdiv?: number) => void;
+  /** Changes how many smoothing passes a lattice body's mesh is built with. */
+  setLatticeSubdiv: (nodeId: string, level: number) => void;
   updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
   // --- CSG (boolean modifiers) ---
   deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
@@ -979,7 +1023,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   // that is the user's call, and starting a sim behind someone's back is how a
   // half-finished shape ends up on the floor.
   sculptStats: null,
-  setSculptNodeId: (id) => set(id ? { sculptNodeId: id, selectedNodeId: id, isPlaying: false } : { sculptNodeId: null, sculptStats: null }),
+  setSculptNodeId: (id) => set(id ? { sculptNodeId: id, latticeNodeId: null, selectedNodeId: id, isPlaying: false } : { sculptNodeId: null, sculptStats: null }),
   setSculptStats: (stats) => set({ sculptStats: stats }),
 
   // Wholesale replacement, not an edit: the version bump is what tells the
@@ -997,6 +1041,62 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     });
   },
   setSculptBrush: (patch) => set((state) => ({ sculptBrush: { ...state.sculptBrush, ...patch } })),
+
+  latticeNodeId: null,
+  latticeTool: 'place',
+  latticePlane: { axis: 'z', index: 0 },
+  // 10 mm to start: the step most parts are laid out on, with 0.1 mm available
+  // for detail without any of the coarse work having to move.
+  latticeSnap: 100,
+  latticeMirror: null,
+  latticeStats: null,
+
+  // Opening one modelling mode closes the other: both take over the drawing of
+  // the body they are on and both bind the pointer, and two of them at once is
+  // two components fighting over one mesh.
+  setLatticeNodeId: (id) => set(id
+    ? { latticeNodeId: id, sculptNodeId: null, selectedNodeId: id, isPlaying: false }
+    : { latticeNodeId: null, latticeStats: null }),
+  setLatticeTool: (tool) => set({ latticeTool: tool }),
+  setLatticePlane: (plane) => set({ latticePlane: plane }),
+  nudgeLatticePlane: (delta) => set((state) => ({
+    latticePlane: { ...state.latticePlane, index: state.latticePlane.index + delta },
+  })),
+  setLatticeSnap: (snap) => set({ latticeSnap: snap }),
+  setLatticeMirror: (axis) => set({ latticeMirror: axis }),
+  setLatticeStats: (stats) => set({ latticeStats: stats }),
+
+  applyLattice: (nodeId, cage, subdiv) => {
+    get().recordInteraction('lattice');
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const traverse = (nodes: any[]): boolean => {
+      if (!nodes) return false;
+      for (const node of nodes) {
+        if (node.id === nodeId) {
+          const level = subdiv ?? node.latticeSubdiv ?? 0;
+          const { vertices, renderVertices, faces } = latticeToSceneGeom(deserializeCage(cage), level);
+          const geom = node.geoms?.find((g: any) => g.type === 'mesh') ?? node.geoms?.[0];
+          if (geom) Object.assign(geom, { vertices, renderVertices, faces });
+          node.latticeCage = cage;
+          node.latticeSubdiv = level;
+          node.latticeEdited = true;
+          return true;
+        }
+        if (traverse(node.children)) return true;
+      }
+      return false;
+    };
+    if (traverse(newScene.nodes)) {
+      set({ sceneGraph: newScene });
+      get().recompile(newScene, undefined, true);
+    }
+  },
+
+  setLatticeSubdiv: (nodeId, level) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node?.latticeCage) return;
+    get().applyLattice(nodeId, node.latticeCage, Math.max(0, Math.min(2, Math.round(level))));
+  },
   
   setDraggedNodeId: (id) => {
     if (id !== null && get().draggedNodeId === null) {
@@ -2064,6 +2164,25 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           renderVertices,
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
+      } else if (type === 'lattice') {
+        // A box on the grid, not a ball of clay: the mode is about placing
+        // points exactly, and the first move is nearly always to push a face
+        // out. See utils/latticeMesh.ts.
+        const cage = serializeCage(boxLattice(LATTICE_UNIT, 200));
+        const { vertices, renderVertices, faces } = latticeToSceneGeom(deserializeCage(cage), 0);
+        geoms = [{
+          name: `${id}_mesh`,
+          type: 'mesh',
+          size: [1],
+          rgba: [0.55, 0.68, 0.85, 1], // drafting blue, to read as constructed
+          mass: 1,
+          condim: 3,
+          dynamic: true,
+          vertices,
+          faces,
+          renderVertices,
+        }];
+        joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'ring') {
         // The canonical boolean: a flattened ellipsoid with a slimmer ellipsoid
         // punched through it along Z. The negative is only a little taller than
@@ -2078,7 +2197,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         ];
         joints = [{ name: `${id}_free`, type: 'free' }];
       }
-      if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube' && type !== 'ring' && type !== 'sculpt') {
+      if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube' && type !== 'ring' && type !== 'sculpt' && type !== 'lattice') {
         geoms = [{ name: `${id}_geom`, type: geomType, size, mass, rgba }];
       }
     }
@@ -2148,6 +2267,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         isSculpt: true,
         sculptBase: DEFAULT_SCULPT_BASE,
         sculptVersion: 1,
+      } : {}),
+      ...(type === 'lattice' ? {
+        isLattice: true,
+        latticeCage: serializeCage(boxLattice(LATTICE_UNIT, 200)),
+        latticeSubdiv: 0,
+        latticeVersion: 1,
       } : {}),
       ...(type === 'curve' ? {
         isCurve: true,

@@ -5,6 +5,7 @@ import { EffectComposer, N8AO } from '@react-three/postprocessing';
 import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
 import { downloadMeshGeomStl } from './utils/meshStlExport';
 import SculptPanel from './components/SculptPanel';
+import LatticePanel from './components/LatticePanel';
 import ColoringSection from './components/ColoringSection';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
@@ -1021,6 +1022,7 @@ function App() {
     parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode,
     deleteNodeGeom, setGeomCsgOp,
     sculptNodeId, setSculptNodeId, setSculptBase,
+    latticeNodeId, setLatticeNodeId,
     undo, redo, undoStack, redoStack
   } = useStore();
 
@@ -1781,6 +1783,20 @@ function App() {
    * at a sphere. The new node is picked out of the store afterwards because
    * `addComponent` mints the id itself and does not hand it back.
    */
+  /**
+   * Adds a box on the grid and opens the lattice tools on it.
+   *
+   * Same reasoning as the sculpt button: nobody adds a lattice body in order to
+   * look at a cube, and leaving them to go and find the tools afterwards makes
+   * two steps out of one intent.
+   */
+  const handleAddLatticeClick = () => {
+    addComponent('lattice', [0, 0, 0.2]);
+    setIsLeftSidebarOpen(false);
+    const created = [...useStore.getState().sceneGraph.nodes].reverse().find((n) => n.isLattice);
+    if (created) useStore.getState().setLatticeNodeId(created.id);
+  };
+
   const handleAddSculptClick = () => {
     addComponent('sculpt', [0, 0, 0.2]);
     setIsLeftSidebarOpen(false);
@@ -2719,6 +2735,21 @@ function App() {
               <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Sculpt</span>
             </div>
 
+            {/* Lattice (points on a grid, connected — the precise counterpart
+                to sculpting's free hand) */}
+            <div
+              draggable
+              onDragStart={(e) => handleDragStart(e, 'lattice')}
+              onClick={() => handleAddLatticeClick()}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Lattice (connect points on a 3D grid into faces — exact dimensions, and smoothing to turn a coarse cage into curves)"
+            >
+              <div className="p-1.5 bg-indigo-50 dark:bg-indigo-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Grid3x3 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Lattice</span>
+            </div>
+
             {/* Curve (rigid curved track) */}
             <div
               draggable
@@ -2904,7 +2935,7 @@ function App() {
             <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none bg-slate-50/50 backdrop-blur-sm">
               <div className="text-slate-500 flex flex-col items-center gap-4 font-medium">
                 <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                Initializing MuJoCo...
+                Initializing Mesh...
               </div>
             </div>
           )}
@@ -3177,6 +3208,8 @@ function App() {
 
           {/* Sculpt tool palette — only mounted while a body is open for sculpting */}
           <SculptPanel />
+          {/* Lattice tool palette — likewise, only while a cage is open */}
+          <LatticePanel />
 
           {/* Floating Mechanical & 3D Print Failure HUD */}
           <PrintAnalysisHUD activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
@@ -3254,6 +3287,22 @@ function App() {
             </h2>
             
             <div className="flex flex-col gap-4">
+                {/* Lattice: only for bodies that ARE one. Unlike sculpting,
+                    this cannot be opened on an arbitrary mesh — the cage is the
+                    document and an imported STL does not have one. */}
+                {selectedNode.isLattice && (
+                  <button
+                    type="button"
+                    onClick={() => setLatticeNodeId(selectedNode.id)}
+                    disabled={latticeNodeId === selectedNode.id}
+                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 disabled:text-slate-400 text-white cursor-pointer disabled:cursor-default"
+                    title="Open the lattice tools on this cage. Pauses the simulation."
+                  >
+                    <Grid3x3 className="w-3.5 h-3.5" />
+                    {latticeNodeId === selectedNode.id ? 'Modelling…' : 'Edit Lattice'}
+                  </button>
+                )}
+
                 {/* Sculpt: offered for any body carrying a mesh, not only for one
                     that started as clay — an imported STL or a boolean result is
                     a perfectly good thing to push around by hand. */}

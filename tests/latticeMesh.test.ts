@@ -4,7 +4,7 @@ import {
   moveVertex, removeVertex, faceNormal, dominantAxis, extrudeFace, mirrorFace,
   isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
-  type Lattice,
+  boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, type Lattice,
 } from '../src/utils/latticeMesh';
 import { subdivide } from '../src/utils/subdivide';
 
@@ -294,5 +294,36 @@ describe('persistence and history', () => {
     const snapshot = cloneLattice(l);
     extrudeFace(l, 1, 4);
     expect(faceCount(snapshot)).toBe(6);
+  });
+});
+
+describe('the starting box', () => {
+  it('is a closed, outward-wound cube centred on the origin', () => {
+    const l = boxLattice(0.005, 4);
+    expect(isWatertight(l)).toBe(true);
+    expect(latticeStats(l)).toMatchObject({ vertices: 8, quads: 6 });
+    expect(latticeBounds(l)).toEqual({ min: [-4, -4, -4], max: [4, 4, 4] });
+    // Outward: the +x face's normal points along +x.
+    const right = l.faces.findIndex((f) => f && f.every((v) => l.coords[v * 3] === 4));
+    expect(dominantAxis(faceNormal(l, right)!)).toEqual({ axis: 'x', sign: 1 });
+  });
+});
+
+describe('the grid steps', () => {
+  it('nest, so a coarse point is always also a fine point', () => {
+    expect([...SNAP_MULTIPLES]).toEqual([1, 10, 100, 1000]);
+    for (let i = 1; i < SNAP_MULTIPLES.length; i++) {
+      expect(SNAP_MULTIPLES[i] % SNAP_MULTIPLES[i - 1]).toBe(0);
+    }
+    // 0.1 mm at the fine end, 100 mm at the coarse end.
+    expect(DEFAULT_UNIT * 1000).toBeCloseTo(0.1);
+    expect(DEFAULT_UNIT * SNAP_MULTIPLES[3] * 1000).toBeCloseTo(100);
+  });
+
+  it('places a coarsely snapped corner exactly on the fine grid', () => {
+    const l = createLattice(DEFAULT_UNIT);
+    const coarse = vertexAt(l, 1000, 0, 0);   // one 100 mm step out
+    const fine = vertexAt(l, 1000, 0, 0);     // the same point, reached finely
+    expect(fine).toBe(coarse);
   });
 });

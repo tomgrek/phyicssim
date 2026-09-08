@@ -61,20 +61,35 @@ export interface Lattice {
 }
 
 /**
- * The snap steps offered, as multiples of `unit`.
+ * The snap steps offered, as multiples of `unit`: 0.1 mm, 1 mm, 10 mm, 100 mm.
  *
- * Powers of two only, and not for tidiness: a 3x step and a 2x step share only
- * every sixth point, so a face drawn on one and a face drawn on the other meet
- * along an edge whose endpoints are not shared vertices. That is a crack, and
- * it survives all the way to the exported STL.
+ * Each is a whole multiple of the one below it, and that is the requirement
+ * rather than a preference. Two steps that share only every sixth point put a
+ * face drawn on one and a face drawn on the other along an edge whose endpoints
+ * are not the same vertices — a crack, and one that survives all the way to the
+ * exported STL. Decades nest exactly, so a 100 mm corner is also a 0.1 mm
+ * corner and the coarse work can be refined without rebuilding it.
  */
-export const SNAP_MULTIPLES = [1, 2, 4, 8] as const;
+export const SNAP_MULTIPLES = [1, 10, 100, 1000] as const;
 export type SnapMultiple = (typeof SNAP_MULTIPLES)[number];
 
-/** Default grid step. 5 mm is a coarse enough cage to be worth subdividing. */
-export const DEFAULT_UNIT = 0.005;
+/**
+ * Metres per grid step: 0.1 mm, the finest thing the snapping offers.
+ *
+ * The lattice is integers, so the fine end costs nothing to have — a 100 mm
+ * step is just a stride of a thousand — and it means a part laid out in
+ * hundreds of millimetres can still be detailed in tenths without any of the
+ * earlier work having to move.
+ */
+export const DEFAULT_UNIT = 0.0001;
 
 export type Axis = 'x' | 'y' | 'z';
+
+/**
+ * What a click does. Named here rather than in the UI because each one is an
+ * operation this module implements, not a mode the UI invents.
+ */
+export type LatticeTool = 'place' | 'select' | 'extrude';
 
 export const AXIS_INDEX: Record<Axis, 0 | 1 | 2> = { x: 0, y: 1, z: 2 };
 
@@ -94,6 +109,29 @@ export function createLattice(unit = DEFAULT_UNIT): Lattice {
 }
 
 const key = (i: number, j: number, k: number) => `${i},${j},${k}`;
+
+/**
+ * The shape a new lattice body starts as: a box, centred on the body origin.
+ *
+ * A box rather than a single face, because the first thing anybody does here is
+ * push a side out, and that needs a side to push. It is also the honest
+ * demonstration of the mode — six quads that subdivide into a rounded solid,
+ * so the relationship between the cage and the shape is visible before any work
+ * has been put in. 200 steps of 0.1 mm makes it 40 mm across: a bench-scale
+ * part, and a whole number of the 10 mm steps the grid starts on.
+ */
+export function boxLattice(unit = DEFAULT_UNIT, halfSteps = 200): Lattice {
+  const lattice = createLattice(unit);
+  const h = Math.max(1, Math.round(halfSteps));
+  const v = (i: number, j: number, k: number) => vertexAt(lattice, i * h, j * h, k * h);
+  addFace(lattice, [v(-1, -1, -1), v(-1, 1, -1), v(1, 1, -1), v(1, -1, -1)]);
+  addFace(lattice, [v(-1, -1, 1), v(1, -1, 1), v(1, 1, 1), v(-1, 1, 1)]);
+  addFace(lattice, [v(-1, -1, -1), v(1, -1, -1), v(1, -1, 1), v(-1, -1, 1)]);
+  addFace(lattice, [v(-1, 1, -1), v(-1, 1, 1), v(1, 1, 1), v(1, 1, -1)]);
+  addFace(lattice, [v(-1, -1, -1), v(-1, -1, 1), v(-1, 1, 1), v(-1, 1, -1)]);
+  addFace(lattice, [v(1, -1, -1), v(1, 1, -1), v(1, 1, 1), v(1, -1, 1)]);
+  return lattice;
+}
 
 export function vertexCount(lattice: Lattice): number {
   return lattice.coords.length / 3;
@@ -402,6 +440,27 @@ export function mirrorCoord(coord: LatticeCoord, axis: Axis): LatticeCoord {
   const out: LatticeCoord = [coord[0], coord[1], coord[2]];
   out[AXIS_INDEX[axis]] = -out[AXIS_INDEX[axis]];
   return out;
+}
+
+/**
+ * The face that is this one's reflection, if it has already been made.
+ *
+ * Wanted whenever an operation has to be applied to both halves of a mirrored
+ * model: the partner is found by reflecting the corners and reversing them,
+ * which is exactly how `mirrorFace` made it.
+ */
+export function findMirrorFace(lattice: Lattice, face: number, axis: Axis): number {
+  const verts = lattice.faces[face];
+  if (!verts) return -1;
+  const reflected: number[] = [];
+  for (const v of verts) {
+    const [i, j, k] = mirrorCoord(coordOf(lattice, v), axis);
+    const found = findVertex(lattice, i, j, k);
+    if (found === -1) return -1;
+    reflected.push(found);
+  }
+  reflected.reverse();
+  return findFace(lattice, reflected);
 }
 
 /**
