@@ -34,9 +34,9 @@ import * as THREE from 'three';
 import { useStore } from '../store/useStore';
 import {
   deserializeCage, serializeCage, cloneLattice, restoreLattice,
-  toSceneGeom, cageEdges, coordOf, vertexAt, addFace,
+  toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace,
   removeFace, removeVertex, moveVertex, flipFace, extrudeFace, mirrorFace, findMirrorFace,
-  faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds,
+  faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord,
   AXIS_INDEX, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
 } from '../utils/latticeMesh';
 
@@ -138,6 +138,15 @@ export function LatticeSurface({
 
   const [pending, setPending] = useState<LatticeCoord[]>([]);
   const [hover, setHover] = useState<LatticeCoord | null>(null);
+  /**
+   * The cage corner under the pointer, if the hovered point is one.
+   *
+   * Kept so that Delete can act on what is under the cursor when nothing has
+   * been explicitly selected. Removing a stray point is the commonest repair in
+   * this mode, and requiring a tool change and a click first made it the
+   * fiddliest.
+   */
+  const hoverVertex = hover ? findVertex(lattice, hover[0], hover[1], hover[2]) : -1;
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
   const [selectedVertex, setSelectedVertex] = useState<number | null>(null);
 
@@ -689,15 +698,26 @@ export function LatticeSurface({
         return;
       }
       if (key === 'delete' || key === 'backspace') {
-        if (selectedFace === null && selectedVertex === null) return;
+        // Swallowed whether or not there is anything to delete. The app's own
+        // Delete removes the selected BODY, and while these tools are open that
+        // is the entire lattice — one keypress away from losing the work,
+        // reachable by aiming slightly wrong.
         event.preventDefault();
+        event.stopPropagation();
+
+        const vertex = selectedVertex !== null ? selectedVertex : hoverVertex !== -1 ? hoverVertex : null;
+        if (selectedFace === null && vertex === null) return;
+
         mutate(() => {
           if (selectedFace !== null) {
             const partner = mirror ? findMirrorFace(lattice, selectedFace, mirror) : -1;
             removeFace(lattice, selectedFace);
             if (partner !== -1) removeFace(lattice, partner);
-          } else if (selectedVertex !== null) {
-            removeVertex(lattice, selectedVertex);
+          } else if (vertex !== null) {
+            const [i, j, k] = mirrorCoord(coordOf(lattice, vertex), mirror ?? 'x');
+            const partner = mirror ? findVertex(lattice, i, j, k) : -1;
+            removeVertex(lattice, vertex);
+            if (partner !== -1 && partner !== vertex) removeVertex(lattice, partner);
           }
         });
         setSelectedFace(null);
@@ -719,7 +739,7 @@ export function LatticeSurface({
     // open and own the shape.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [closePending, commit, lattice, mirror, mutate, nudgeLatticePlane, selectedFace, selectedVertex, snap]);
+  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedFace, selectedVertex, snap]);
 
   // A drag left open by an unmount would leave the camera disabled.
   useEffect(() => () => {
@@ -841,8 +861,12 @@ export function LatticeSurface({
       {/* Where a click would land. */}
       {hover && (
         <mesh position={[hover[0] * unit, hover[1] * unit, hover[2] * unit]} raycast={() => null}>
-          <sphereGeometry args={[step * 0.15, 12, 8]} />
-          <meshBasicMaterial color="#38bdf8" depthTest={false} />
+          {/* Bigger and warmer over an existing corner, because that is the one
+              the pointer will join to, weld onto or delete — and a cursor that
+              looks the same whether or not it has caught something makes all
+              three of those a guess. */}
+          <sphereGeometry args={[hoverVertex !== -1 ? step * 0.24 : step * 0.15, 12, 8]} />
+          <meshBasicMaterial color={hoverVertex !== -1 ? '#f59e0b' : '#38bdf8'} depthTest={false} />
         </mesh>
       )}
 

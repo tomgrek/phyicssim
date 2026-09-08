@@ -33,7 +33,7 @@ interface ToolDefinition {
 
 const TOOLS: ToolDefinition[] = [
   { tool: 'place', label: 'Place', key: '1', icon: PenLine, hint: 'Click grid points to draw a face. Four corners closes it automatically; Enter closes a triangle; Esc abandons it.' },
-  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it, or click a face. Delete removes what is selected; F turns a face inside out.' },
+  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it, or click a face to select it. F turns a face inside out.' },
   { tool: 'extrude', label: 'Extrude', key: '3', icon: MoveVertical, hint: 'Drag a face along its own axis to push it out in whole grid steps — the fastest way to get from a plate to a solid.' },
 ];
 
@@ -286,7 +286,8 @@ export function LatticePanel() {
       )}
 
       <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 pt-1 border-t border-slate-200 dark:border-slate-800">
-        <kbd className="font-mono">X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> turns the plane · Right-drag orbits · Ctrl+Z undoes an edit
+        <kbd className="font-mono">X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> turns the plane · <kbd className="font-mono">Del</kbd> removes the corner
+        under the pointer, or whatever is selected · Right-drag orbits · <kbd className="font-mono">Ctrl+Z</kbd> undoes an edit
       </p>
     </div>
   );
