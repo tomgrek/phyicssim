@@ -245,6 +245,41 @@ export function prepareJobLines(gcode: string): JobLine[] {
  * waiting for a tool change that never comes, at the end of a carve that is
  * already finished.
  */
+/**
+ * One line awaiting its `ok`.
+ *
+ * `job` slots carry their byte cost so the streamer knows how much of GRBL's
+ * serial buffer it is currently occupying; `other` slots are the interactive
+ * commands, which are paced one at a time and may have someone waiting on them.
+ */
+type AckSlot =
+  | { kind: 'job'; bytes: number }
+  | { kind: 'other'; resolve: (() => void) | null };
+
+/**
+ * GRBL's serial receive buffer, in bytes.
+ *
+ * The controller acknowledges a line when it has *parsed* it, not when it has
+ * moved, so the streamer is free to keep the buffer full — and has to, because
+ * a job streamed one line at a time can never fill the 15-block planner behind
+ * it. With nothing queued to plan against, GRBL decelerates to a stop at the
+ * end of every block, which on a finishing raster of half-millimetre moves is
+ * a stop at every point: slow, and it chatters.
+ */
+const GRBL_RX_BUFFER_BYTES = 128;
+
+/**
+ * How much of that buffer the streamer will fill.
+ *
+ * Short of the real figure on purpose. The count here is of bytes *written*,
+ * and it can only be an estimate of what the controller still holds: the reply
+ * for a line may already be on the wire when the next one is queued. Leaving a
+ * margin means an estimate that runs slightly optimistic still cannot overflow
+ * the buffer, and the difference in throughput between 112 and 128 bytes is
+ * nothing next to what overflowing costs.
+ */
+const RX_FILL_BYTES = GRBL_RX_BUFFER_BYTES - 16;
+
 export function classifyJobLine(line: string): 'tool-change' | 'stop' | 'motion' {
   const code = line.toUpperCase();
   if (/\bM0*6\b/.test(code)) return 'tool-change';
@@ -386,14 +421,32 @@ class WebSerialManager {
   private isPaused = false;
 
   /**
-   * Waiters for a single command's reply, used by the probing cycle.
+   * Every line sent that still owes an `ok`, oldest first.
    *
-   * A job is paced by its own `ok` handling, but probing has to read a number
-   * back off the machine rather than just push lines at it, so those two
-   * commands wait for the controller instead of returning the moment the bytes
-   * are written.
+   * GRBL answers in the order it was asked, so one FIFO covers both kinds of
+   * traffic: the job stream, and the interactive commands the app sends
+   * alongside it. Keeping them in one queue is the point.
+   *
+   * It used to be a queue of probe waiters only, and a job took any `ok` that
+   * no waiter claimed as its own permission to send another line. Nothing the
+   * app sent outside the stream registered a waiter — `sendLine` still doesn't
+   * return one — so every such line's `ok` was miscounted as the job's, and the
+   * streamer sent one more line than it had been acked for. The lead never
+   * recovers: it persists for the rest of the program, and once it is wide
+   * enough the lines outrun GRBL's 128-byte serial buffer, which merges two
+   * blocks into one and produces `error:24`, "two G-code commands that both
+   * require the use of the XYZ axis words", against a program that contains no
+   * such line anywhere.
    */
-  private okWaiters: (() => void)[] = [];
+  private ackQueue: AckSlot[] = [];
+
+  /**
+   * Bytes of job stream sitting in GRBL's serial buffer, unacknowledged.
+   *
+   * The sum of the `job` slots in `ackQueue`, kept alongside it so the pump
+   * does not have to walk the queue on every line.
+   */
+  private jobBytesInFlight = 0;
   private pendingProbe: ((z: number | null) => void) | null = null;
 
   /**
@@ -654,9 +707,19 @@ class WebSerialManager {
     });
   }
 
-  /** Sends a single G-code line to the machine, however it is connected. */
+  /**
+   * Sends a single G-code line to the machine, however it is connected.
+   *
+   * The line is booked into `ackQueue` before it goes out. Nobody is waiting on
+   * it — that is what `sendAndWait` is for — but the `ok` it will produce has
+   * to be accounted for, or the job stream takes it as permission to send a
+   * line it has not been acked for. Realtime bytes are exempt and go through
+   * `writeRealtime`, because GRBL answers those out of band and never with an
+   * `ok`.
+   */
   public async sendLine(command: string): Promise<void> {
     if (!this.transport || !this.state.connected) return;
+    this.ackQueue.push({ kind: 'other', resolve: null });
     // Bare: each transport frames the line the way its own wire needs.
     await this.transport.writeLine(command);
   }
@@ -702,11 +765,14 @@ class WebSerialManager {
     }
 
     if (line.startsWith('ok')) {
-      const resolve = this.okWaiters.shift();
-      if (resolve) {
-        resolve();
-      } else if (this.isJobRunning && !this.isPaused) {
-        this.advanceJobQueue();
+      // Replies come back in the order the lines went out, so the ack belongs
+      // to the oldest unanswered line whatever kind it was.
+      const slot = this.ackQueue.shift();
+      if (slot?.kind === 'job') {
+        this.jobBytesInFlight = Math.max(0, this.jobBytesInFlight - slot.bytes);
+        this.pumpJobQueue();
+      } else if (slot?.kind === 'other') {
+        slot.resolve?.();
       }
     } else if (line.startsWith('error:')) {
       // A refused command never completes, so release whoever is waiting on it
@@ -714,23 +780,38 @@ class WebSerialManager {
       const failProbe = this.pendingProbe;
       this.pendingProbe = null;
       if (failProbe) failProbe(null);
-      const waiters = this.okWaiters;
-      this.okWaiters = [];
-      for (const w of waiters) w();
+      const slots = this.ackQueue;
+      this.ackQueue = [];
+      this.jobBytesInFlight = 0;
+      for (const s of slots) if (s.kind === 'other') s.resolve?.();
+
+      /*
+       * Which line was refused.
+       *
+       * Not the one most recently sent: the streamer keeps GRBL's buffer full,
+       * so several lines are in flight and the refusal belongs to the oldest of
+       * them — the head of the queue, the same ordering every other ack
+       * follows. Counting them back off the send index is what keeps the line
+       * number in the error message pointing at the line the operator has to go
+       * and look at.
+       */
+      const jobSlotsInFlight = slots.reduce((n, s) => n + (s.kind === 'job' ? 1 : 0), 0);
 
       /*
        * A refused line ends the job, and says so.
        *
-       * The refusal *is* the missing `ok`: the stream is paced one ack at a
-       * time, so a line GRBL will not take leaves the queue waiting for a reply
-       * that has already been given and will not come again. Nothing more was
-       * ever sent after it, and the app went on showing RUNNING at whatever
-       * percentage it had reached — a job that had stopped dead, presented as
-       * one still cutting. Standing it down keeps the resume point, so the
-       * operator can fix whatever was refused and pick the program back up.
+       * The refusal is an ack that will not come again, so the stream stalls on
+       * it: nothing more is sent, and the app went on showing RUNNING at
+       * whatever percentage it had reached — a job that had stopped dead,
+       * presented as one still cutting. Standing it down keeps the resume
+       * point, so the operator can fix whatever was refused and pick the
+       * program back up.
        */
       if (this.isJobRunning || this.isPaused) {
-        const at = Math.max(0, this.jobLineBase + this.currentQueueIndex);
+        const at = Math.max(
+          0,
+          this.jobLineBase + this.currentQueueIndex - jobSlotsInFlight + 1
+        );
         this.abandonJob('alarm');
         this.stopElapsedTicker();
         this.updateState({
@@ -898,11 +979,20 @@ class WebSerialManager {
         resolve();
       };
       const timer = setTimeout(() => {
-        this.okWaiters = this.okWaiters.filter(w => w !== finish);
+        // Give the slot up rather than dropping it: the reply may still arrive,
+        // and a slot removed from the middle would shift every later ack onto
+        // the wrong command.
+        for (const slot of this.ackQueue) {
+          if (slot.kind === 'other' && slot.resolve === finish) slot.resolve = null;
+        }
         finish();
       }, timeoutMs);
-      this.okWaiters.push(finish);
-      this.sendLine(command);
+      if (!this.transport || !this.state.connected) {
+        finish();
+        return;
+      }
+      this.ackQueue.push({ kind: 'other', resolve: finish });
+      void this.transport.writeLine(command);
     });
   }
 
@@ -1049,15 +1139,16 @@ class WebSerialManager {
     /*
      * The stream owns the ack channel from here.
      *
-     * Every `ok` is one line's worth of permission to send the next, and a
-     * waiter left over from a probe or a zeroing move that timed out would eat
-     * the first one — after which the program sits at line one, for ever,
-     * showing RUNNING. There is nothing left for those waiters to wait for
-     * anyway: whatever they were pacing finished before this program started.
+     * A slot left over from a probe or a zeroing move that timed out would eat
+     * the first `ok` the program earns — after which the byte count never comes
+     * back down and the stream sits at line one, for ever, showing RUNNING.
+     * There is nothing left for those to wait for anyway: whatever they were
+     * pacing finished before this program started.
      */
-    const stale = this.okWaiters;
-    this.okWaiters = [];
-    for (const w of stale) w();
+    const stale = this.ackQueue;
+    this.ackQueue = [];
+    this.jobBytesInFlight = 0;
+    for (const s of stale) if (s.kind === 'other') s.resolve?.();
 
     // The beam does not stay lit into the cut: its S word would fight the
     // program's own, and `$32` has to go back before the job's first rapid.
@@ -1094,7 +1185,7 @@ class WebSerialManager {
       // would be assuming the operator re-zeroed rather than checking.
     });
 
-    this.advanceJobQueue();
+    this.pumpJobQueue();
   }
 
   /**
@@ -1170,7 +1261,7 @@ class WebSerialManager {
       pauseMessage: undefined,
     });
 
-    this.advanceJobQueue();
+    this.pumpJobQueue();
 
     return {
       ok: true,
@@ -1192,18 +1283,52 @@ class WebSerialManager {
     return planResume(this.program.map((l) => l.code), fromLine, options);
   }
 
-  /** Processes and sends the next line in the G-code queue. */
-  private async advanceJobQueue() {
-    if (!this.isJobRunning || this.isPaused) return;
+  /**
+   * Sends as much of the program as GRBL's serial buffer will hold.
+   *
+   * The character-counting protocol: keep a running total of the bytes written
+   * that have not yet been acknowledged, and send the next line whenever it
+   * fits inside `RX_FILL_BYTES`. GRBL acks on parse rather than on motion, so
+   * the buffer stays full and the 15-block planner behind it always has moves
+   * to look ahead at — which is what lets it carry speed through a corner
+   * instead of decelerating to a stop at the end of every block.
+   *
+   * A pause stops the pump where it stands. The lines already in the buffer
+   * still run, which is correct: GRBL executes them in order, so the retract
+   * and park that `triggerPause` sends land after the last of the cutting moves
+   * rather than in the middle of them.
+   */
+  private pumpJobQueue() {
+    while (this.isJobRunning && !this.isPaused) {
+      if (this.currentQueueIndex >= this.gcodeQueue.length) {
+        // Everything is sent, but the machine may still be working through what
+        // is in its buffer. The job is over when the last line is acked.
+        if (this.jobBytesInFlight === 0) {
+          this.isJobRunning = false;
+          this.stopElapsedTicker();
+          // It finished. There is nothing left to resume into.
+          this.updateState({ status: 'IDLE', progressPercent: 100, resume: null });
+        }
+        return;
+      }
 
-    if (this.currentQueueIndex >= this.gcodeQueue.length) {
-      this.isJobRunning = false;
-      this.stopElapsedTicker();
-      // It finished. There is nothing left to resume into.
-      this.updateState({ status: 'IDLE', progressPercent: 100, resume: null });
-      return;
+      const bytes = this.gcodeQueue[this.currentQueueIndex].length + 1;
+      // Always allow one line through, however long: a line that cannot fit an
+      // empty buffer would otherwise stall the job for ever.
+      if (this.jobBytesInFlight > 0 && this.jobBytesInFlight + bytes > RX_FILL_BYTES) return;
+
+      if (!this.sendNextJobLine(bytes)) return;
     }
+  }
 
+  /**
+   * Sends one line, or takes the pause it asks for.
+   *
+   * Returns false when the pump must stop — the line was a tool change or a
+   * programmed stop, and nothing further should go out until the operator says
+   * so.
+   */
+  private sendNextJobLine(bytes: number): boolean {
     const line = this.gcodeQueue[this.currentQueueIndex];
     const note = this.gcodeNotes[this.currentQueueIndex] || '';
     this.currentQueueIndex++;
@@ -1222,8 +1347,8 @@ class WebSerialManager {
     const kind = classifyJobLine(line);
 
     if (kind === 'tool-change') {
-      this.triggerPause('PAUSED_TOOL', this.describeToolChange(line, note));
-      return;
+      void this.triggerPause('PAUSED_TOOL', this.describeToolChange(line, note));
+      return false;
     }
 
     if (kind === 'stop') {
@@ -1231,14 +1356,21 @@ class WebSerialManager {
       // which sheet in the comment.
       const sheet = note.match(/Sheet (\d+ of \d+)/);
       if (sheet) {
-        this.triggerPause('PAUSED_MATERIAL', `Insert Material Sheet ${sheet[1]}`);
+        void this.triggerPause('PAUSED_MATERIAL', `Insert Material Sheet ${sheet[1]}`);
       } else {
-        this.triggerPause('PAUSED_MATERIAL', note || 'Programmed stop. Resume when ready.');
+        void this.triggerPause('PAUSED_MATERIAL', note || 'Programmed stop. Resume when ready.');
       }
-      return;
+      return false;
     }
 
-    await this.sendLine(line);
+    if (!this.transport || !this.state.connected) return false;
+    // Booked as a job slot rather than going through `sendLine`, so its ack is
+    // credited back to the stream's byte count and not to an interactive
+    // command that never asked for one.
+    this.ackQueue.push({ kind: 'job', bytes });
+    this.jobBytesInFlight += bytes;
+    void this.transport.writeLine(line);
+    return true;
   }
 
   /**
@@ -1336,7 +1468,7 @@ class WebSerialManager {
     this.updateState({ status: 'RUNNING', pauseMessage: undefined });
     // Out of band GRBL cycle start.
     await this.writeRealtime(0x7e); // '~'
-    this.advanceJobQueue();
+    this.pumpJobQueue();
   }
 
   /**
@@ -1406,7 +1538,10 @@ class WebSerialManager {
     //    carries the job forward now.
     this.isJobRunning = false;
     this.isPaused = false;
-    this.okWaiters = [];
+    // The soft reset below throws away whatever GRBL had buffered, so the acks
+    // those lines owed are never coming.
+    this.ackQueue = [];
+    this.jobBytesInFlight = 0;
     await this.writeRealtime(0x18); // Ctrl-X, soft reset
 
     this.updateState({
@@ -1639,9 +1774,10 @@ class WebSerialManager {
     this.gcodeNotes = [];
     this.currentQueueIndex = 0;
     // Anything still waiting on an `ok` that will now never come.
-    const waiters = this.okWaiters;
-    this.okWaiters = [];
-    for (const w of waiters) w();
+    const waiters = this.ackQueue;
+    this.ackQueue = [];
+    this.jobBytesInFlight = 0;
+    for (const s of waiters) if (s.kind === 'other') s.resolve?.();
     const probe = this.pendingProbe;
     this.pendingProbe = null;
     if (probe) probe(null);

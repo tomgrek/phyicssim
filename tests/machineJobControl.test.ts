@@ -23,6 +23,10 @@ function attachFakeGrbl() {
   };
 
   const sent: string[] = [];
+  /** Bytes written that the fake has not yet acknowledged. */
+  let outstanding = 0;
+  /** The high-water mark of that, which is what must never exceed the buffer. */
+  const peak = { bytes: 0 };
 
   mgr.state.connected = true;
   mgr.state.status = 'IDLE';
@@ -44,10 +48,15 @@ function attachFakeGrbl() {
       const trimmed = line.trim();
       if (!trimmed) return;
       sent.push(trimmed);
+      // The controller holds the whole line plus its terminator until it has
+      // parsed it, which is what the streamer's byte budget is counting.
+      outstanding += trimmed.length + 1;
+      if (outstanding > peak.bytes) peak.bytes = outstanding;
       // Acknowledged on a timer rather than a microtask, so a test can let the
-      // stream advance one line at a time instead of draining the whole job
+      // stream advance a little at a time instead of draining the whole job
       // the first time it yields.
       await new Promise<void>((resolve) => setTimeout(() => {
+        outstanding -= trimmed.length + 1;
         mgr.handleIncomingLine('ok');
         resolve();
       }, 0));
@@ -56,6 +65,7 @@ function attachFakeGrbl() {
 
   return {
     sent,
+    peak,
     lines: () => sent.filter((s) => s.length > 1),
     detach() {
       mgr.transport = null;
@@ -74,13 +84,20 @@ async function advance(n: number) {
   for (let i = 0; i < n; i++) await settle();
 }
 
+/*
+ * Long enough that the streamer cannot swallow it whole.
+ *
+ * The stream is paced by GRBL's 128-byte serial buffer, not one line at a
+ * time, so a seven-line program goes out in a single burst and is finished
+ * before the first `ok` lands — which leaves nothing running to pause. Two
+ * hundred moves is a few thousand bytes, so the pump is always holding some
+ * back and pause, resume and "did any line go twice" all mean something.
+ */
 const JOB = [
   'G21',
   'G90',
   'G1 X10 F600',
-  'G1 X20',
-  'G1 X30',
-  'G1 X40',
+  ...Array.from({ length: 200 }, (_, i) => `G1 X${(i + 2) * 10}`),
   'M30',
 ].join('\n');
 
@@ -123,6 +140,42 @@ describe('pausing and resuming a running job', () => {
     expect(fake.sent).toContain('~');
     expect(webSerialManager.getState().currentLine).toBeGreaterThan(lineAtPause);
     // The program's own moves all reached the machine, none twice.
+    const moves = fake.lines().filter((l) => l.startsWith('G1 X'));
+    expect(moves).toEqual([...new Set(moves)]);
+  });
+
+  /*
+   * The bug this guards against cost a relief carve two hours in.
+   *
+   * The stream used to take any `ok` that no waiter claimed as its own
+   * permission to send another line. Nothing sent outside the stream — a
+   * retract at a tool change, an `M5`, a laser-mode setting — registered a
+   * waiter, so its `ok` was miscounted as the job's and the streamer sent one
+   * line more than it had been acked for. The lead never comes back: it
+   * persists for the rest of the program, and once it is wide enough the lines
+   * outrun GRBL's 128-byte serial buffer, which merges two blocks into one.
+   * What the operator sees is `error:24`, "two G-code commands that both
+   * require the use of the XYZ axis words", reported against a program that
+   * contains no such line anywhere.
+   */
+  it('never puts more in the buffer than GRBL can hold', async () => {
+    webSerialManager.startJob(JOB);
+    await advance(30);
+    expect(fake.peak.bytes).toBeLessThanOrEqual(128);
+  });
+
+  it('does not take an interactive command\'s ack as the job\'s own', async () => {
+    webSerialManager.startJob(JOB);
+    await advance(4);
+
+    // The kind of thing the app sends alongside a running job: a spindle stop,
+    // a retract, a mode change. Each earns exactly one `ok` of its own.
+    for (let i = 0; i < 8; i++) await webSerialManager.sendLine('M5');
+    await advance(20);
+
+    expect(fake.peak.bytes).toBeLessThanOrEqual(128);
+    // And the program itself is still intact — no line sent twice, none lost
+    // to an ack that was credited to the wrong sender.
     const moves = fake.lines().filter((l) => l.startsWith('G1 X'));
     expect(moves).toEqual([...new Set(moves)]);
   });
