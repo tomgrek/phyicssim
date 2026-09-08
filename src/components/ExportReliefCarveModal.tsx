@@ -22,7 +22,7 @@ import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from './NumberInput';
 import { useStore } from '../store/useStore';
 import { FdmNotice } from './FdmNotice';
-import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 
 interface Props {
@@ -2061,6 +2061,11 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             {/* A relief is the longest job this app produces and the one that
                 hurts most to restart from scratch. */}
             <JobResumeBanner machineState={machineState} />
+
+            {/* Takes over from the preflight checklist the moment the job
+                starts: this modal covers the status bar's progress readout, so
+                without it a running carve reports nothing at all. */}
+            <JobProgress machineState={machineState} />
 
             <JobPreflight
               machineState={machineState}

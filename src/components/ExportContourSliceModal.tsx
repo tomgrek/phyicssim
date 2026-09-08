@@ -9,7 +9,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from './NumberInput';
 import { useStore } from '../store/useStore';
 import { FdmNotice } from './FdmNotice';
-import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
 import {
@@ -903,6 +903,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   />
                 </div>
               </div>
+              <JobProgress machineState={machineState} />
               <JobPreflight
                 machineState={machineState}
                 tool={machineMode === 'cnc' ? `${bitDiameterMm} mm flat end mill, 2-flute upcut` : undefined}

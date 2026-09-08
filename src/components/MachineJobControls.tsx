@@ -2,6 +2,7 @@ import React from 'react';
 import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw } from 'lucide-react';
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
+import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from './NumberInput';
 
 /**
@@ -512,6 +513,82 @@ export const JobPreflight: React.FC<{
   );
 };
 
+
+/**
+ * How far through the job is, in the panel the operator is already looking at.
+ *
+ * All of this existed already — it is in the status bar along the bottom of the
+ * window — and none of it could be seen while a carve was running, because the
+ * export modal that starts the job is a `fixed inset-0 z-50` overlay and the
+ * status bar underneath it is `z-20`. Pressing Start put a blurred sheet over
+ * the only progress readout in the app for the whole of a four-hour cut, and
+ * `JobPreflight` deliberately blanks itself mid-job on the assumption that
+ * something else is showing this. Nothing was.
+ *
+ * Time rather than lines is the headline for the same reason the status bar
+ * leads with it: G-code lines are not evenly sized in time, so "line 4,000 of
+ * 7,000" is not 57% of the wait. The line count is still here, labelled as what
+ * it is — where in the file the streamer has got to, which is the number worth
+ * quoting when something has gone wrong.
+ */
+export const JobProgress: React.FC<{ machineState: MachineState }> = ({ machineState }) => {
+  const running =
+    machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
+  if (!machineState.connected || !running) return null;
+
+  const { elapsedSeconds: elapsed, estimatedSeconds: estimate } = machineState;
+  // Against the clock when the job quoted a run time, and against lines sent
+  // when it did not — the same fallback the status bar uses.
+  const percent = estimate
+    ? Math.min(100, (elapsed / estimate) * 100)
+    : machineState.progressPercent;
+  const paused = machineState.status.startsWith('PAUSED');
+
+  return (
+    <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-1.5">
+      <div className="flex items-baseline justify-between gap-2">
+        <h4 className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          {machineState.status === 'PAUSED_PARKED'
+            ? 'Parked'
+            : paused
+              ? 'Paused'
+              : 'Cutting'}
+        </h4>
+        <span className="font-mono text-[11px] tabular-nums text-slate-700 dark:text-slate-200">
+          {formatDuration(elapsed)}
+          {estimate !== null && (
+            <>
+              {' / '}
+              {formatDuration(estimate)}
+              <span className="text-slate-400">
+                {' '}({formatDuration(Math.max(0, estimate - elapsed))} left)
+              </span>
+            </>
+          )}
+        </span>
+      </div>
+
+      <div
+        className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
+        title={
+          estimate !== null
+            ? 'Elapsed against the estimated run time'
+            : 'Lines sent to the controller — the job did not quote a run time'
+        }
+      >
+        <div
+          className={`h-full transition-all ${paused ? 'bg-amber-500' : 'bg-emerald-500'}`}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+
+      <p className="font-mono text-[10px] text-slate-400">
+        line {machineState.currentLine.toLocaleString()} /{' '}
+        {machineState.totalLines.toLocaleString()} sent
+      </p>
+    </div>
+  );
+};
 
 /**
  * Trimming the feed and the spindle while the job is running.
